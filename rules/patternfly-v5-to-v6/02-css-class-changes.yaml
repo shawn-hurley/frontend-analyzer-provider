@@ -28,6 +28,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -85,6 +86,26 @@
       filePattern: "\\.snap$"
   message: "Snapshot file contains PF v5 class names (pf-v5-c-*) that will not match after upgrading to PF v6. Delete the snapshot file and re-run tests to regenerate snapshots with PF v6 class names."
 
+# NOTE: This rule requires kantra (uses builtin.filecontent with and/not).
+# It will not fire when using standalone `analyze` command.
+- ruleID: pfv6-missing-utilities-css-import
+  description: "PF v6 requires separate utilities CSS import"
+  labels:
+    - change-type=missing-import
+    - has-codemod=false
+  effort: 1
+  category: mandatory
+  when:
+    and:
+      - builtin.filecontent:
+          pattern: "@patternfly/react-core/dist/styles/base\\.css"
+          filePattern: "\\.(ts|tsx|js|jsx)$"
+      - not: true
+        builtin.filecontent:
+          pattern: "@patternfly/patternfly/utilities/_index\\.css"
+          filePattern: "\\.(ts|tsx|js|jsx)$"
+  message: "PF v6 moved utility CSS classes into a separate file. Add import '@patternfly/patternfly/utilities/_index.css' alongside your existing base.css import. Without this, PF utility classes (pf-v6-u-mb-lg, pf-v6-u-text-align-center, etc.) will not render."
+
 # Pipeline extras — CSS class changes not covered by codemods
 
 - ruleID: pfv6-css-calendar-month-classes
@@ -92,6 +113,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -105,6 +127,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -119,6 +142,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -132,6 +156,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -145,6 +170,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -158,6 +184,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -171,6 +198,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -184,6 +212,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -197,6 +226,7 @@
   labels:
     - change-type=css-class
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:

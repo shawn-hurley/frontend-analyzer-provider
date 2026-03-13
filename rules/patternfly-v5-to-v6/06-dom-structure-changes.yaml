@@ -7,6 +7,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -20,6 +21,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -33,6 +35,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -46,6 +49,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -59,6 +63,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -72,6 +77,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -85,6 +91,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -98,6 +105,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -111,6 +119,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -124,6 +133,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -139,6 +149,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -148,7 +159,7 @@
   message: "AccordionItem now renders a wrapping <div> element in PF v6. This may break CSS selectors or snapshot tests that rely on the previous DOM structure."
 
 - ruleID: pfv6-dom-masthead-layout
-  description: "Masthead: layout restructured — MastheadToggle moves inside MastheadMain"
+  description: "Masthead: MastheadToggle is direct child of Masthead (should be inside MastheadMain)"
   labels:
     - change-type=dom-structure
     - has-codemod=true
@@ -156,15 +167,17 @@
   category: mandatory
   when:
     frontend.referenced:
-      pattern: "^(MastheadToggle|MastheadMain)$"
+      pattern: "^MastheadToggle$"
       location: JSX_COMPONENT
-  message: "Masthead layout restructured in PF v6. Move MastheadToggle INSIDE MastheadMain (it was a sibling before). Wrap the Brand component with MastheadLogo inside MastheadBrand. Replace <Button variant='plain'><BarsIcon /></Button> inside MastheadToggle with <PageToggleButton isHamburgerButton onSidebarToggle={handler} />. The new structure is: <Masthead> <MastheadMain> <MastheadToggle>...</MastheadToggle> <MastheadBrand><MastheadLogo>...</MastheadLogo></MastheadBrand> </MastheadMain> <MastheadContent>...</MastheadContent> </Masthead>. Codemod: masthead-name-changes"
+      parent: "^Masthead$"
+  message: "Masthead layout restructured in PF v6. MastheadToggle must be moved INSIDE MastheadMain (it is currently a sibling). Wrap the Brand component with MastheadLogo inside MastheadBrand. Replace <Button variant='plain'><BarsIcon /></Button> inside MastheadToggle with <PageToggleButton isHamburgerButton onSidebarToggle={handler} />. The new structure is: <Masthead> <MastheadMain> <MastheadToggle>...</MastheadToggle> <MastheadBrand><MastheadLogo>...</MastheadLogo></MastheadBrand> </MastheadMain> <MastheadContent>...</MastheadContent> </Masthead>. Codemod: masthead-name-changes"
 
 - ruleID: pfv6-dom-menu-item-action
   description: "MenuItemAction: DOM structure changed"
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -178,6 +191,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -191,6 +205,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -204,6 +219,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -218,6 +234,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -231,6 +248,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -244,6 +262,7 @@
   labels:
     - change-type=dom-structure
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:

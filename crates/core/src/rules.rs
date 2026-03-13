@@ -70,6 +70,9 @@ pub struct RuleLink {
 /// IMPORTANT: And/Or must come before Provider in the enum because `serde(untagged)`
 /// tries variants in order, and `ProviderWhen` (a BTreeMap) would greedily match
 /// any JSON object including `{ or: [...] }` and `{ and: [...] }`.
+///
+/// Note: `not` is supported by kantra's rule engine but not by our standalone
+/// evaluate_when. Use kantra for rules that need `not` conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WhenCondition {

@@ -64,16 +64,16 @@
   message: "Old DualListSelector moved to deprecated. Import from /next or main path. Codemod: dualListSelector-deprecated / dualListSelectorNext-promoted"
 
 - ruleID: pfv6-deprecated-modal
-  description: "Old Modal API must be migrated to new composable Modal"
+  description: "Old Modal API: uses title/actions props instead of ModalHeader/ModalBody"
   labels: [change-type=component-removal, has-codemod=true]
   effort: 5
   category: mandatory
   when:
-    frontend.referenced:
-      pattern: "^(Modal|ModalVariant)$"
-      location: IMPORT
-      from: "^@patternfly/react-core$"
-  message: "Old Modal API is removed in PF v6. Migrate to the new composable Modal from '@patternfly/react-core': replace 'title' prop with a <ModalHeader> child containing a <ModalTitle>, move body content into <ModalBody>, move actions into <ModalFooter>, replace 'onClose' with 'onClose' on ModalHeader, replace 'variant' with the same prop on the new Modal, and replace 'isOpen' with conditional rendering or the 'isOpen' prop. The new Modal uses ModalHeader/ModalBody/ModalFooter children instead of title/actions/children props. Codemod: modal-deprecated / modalNext-promoted"
+    or:
+      - frontend.referenced: { pattern: "^title$", location: JSX_PROP, component: "^Modal$" }
+      - frontend.referenced: { pattern: "^actions$", location: JSX_PROP, component: "^Modal$" }
+      - frontend.referenced: { pattern: "^(Modal|ModalVariant)$", location: IMPORT, from: "@patternfly/react-core/deprecated" }
+  message: "Old Modal API is removed in PF v6. Migrate to the new composable Modal from '@patternfly/react-core': replace 'title' prop with a <ModalHeader> child, move body content into <ModalBody>, move actions into <ModalFooter>, replace 'onClose' with 'onClose' on ModalHeader. The new Modal uses ModalHeader/ModalBody/ModalFooter children instead of title/actions/children props. Codemod: modal-deprecated / modalNext-promoted"
 
 - ruleID: pfv6-deprecated-tile
   description: "Tile deprecated — use Card"

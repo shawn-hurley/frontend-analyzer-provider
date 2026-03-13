@@ -25,13 +25,16 @@
   message: "ToolbarChipGroupContent renamed to ToolbarLabelGroupContent. Codemod: toolbarChipGroupContent-rename-component"
 
 - ruleID: pfv6-rename-masthead-brand
-  description: "MastheadBrand renamed to MastheadLogo"
+  description: "MastheadBrand: children should be wrapped in MastheadLogo"
   labels: [change-type=component-rename, has-codemod=true]
   effort: 1
   category: mandatory
   when:
-    frontend.referenced: { pattern: "^MastheadBrand$", location: JSX_COMPONENT }
-  message: "MastheadBrand renamed to MastheadLogo in PF v6. Codemod: masthead-name-changes"
+    and:
+      - frontend.referenced: { pattern: "^MastheadBrand$", location: JSX_COMPONENT }
+      - not: true
+        frontend.referenced: { pattern: "^MastheadLogo$", location: JSX_COMPONENT }
+  message: "MastheadBrand in PF v6 requires a MastheadLogo child to wrap your logo/brand content. MastheadBrand was NOT renamed — MastheadLogo is a new inner component. Wrap your Brand content: <MastheadBrand><MastheadLogo>...</MastheadLogo></MastheadBrand>. Codemod: masthead-name-changes"
 
 - ruleID: pfv6-rename-content-header
   description: "ContentHeader renamed to PageHeader (component-groups)"

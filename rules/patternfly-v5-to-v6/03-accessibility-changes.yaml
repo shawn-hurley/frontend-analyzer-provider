@@ -3,6 +3,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 3
   category: potential
   when:
@@ -16,6 +17,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -29,6 +31,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 3
   category: potential
   when:
@@ -44,6 +47,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -57,6 +61,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -70,6 +75,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -83,6 +89,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 3
   category: potential
   when:
@@ -96,6 +103,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 1
   category: potential
   when:
@@ -109,6 +117,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:
@@ -122,6 +131,7 @@
   labels:
     - change-type=accessibility
     - has-codemod=false
+    - impact=frontend-testing
   effort: 2
   category: potential
   when:

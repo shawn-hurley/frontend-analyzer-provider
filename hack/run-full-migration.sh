@@ -14,10 +14,11 @@
 #   9. Compare against real v6 migration
 #
 # Usage:
-#   ./hack/run-full-migration.sh                  # pattern fixes only
-#   ./hack/run-full-migration.sh --with-goose     # pattern + goose LLM fixes
-#   ./hack/run-full-migration.sh --skip-build     # skip cargo build
-#   ./hack/run-full-migration.sh --skip-kantra    # use standalone analyze instead of kantra
+#   ./hack/run-full-migration.sh                        # pattern fixes only
+#   ./hack/run-full-migration.sh --with-goose           # pattern + goose LLM fixes
+#   ./hack/run-full-migration.sh --skip-build           # skip cargo build
+#   ./hack/run-full-migration.sh --skip-kantra          # use standalone analyze instead of kantra
+#   ./hack/run-full-migration.sh --include-testing-rules # include DOM/CSS/a11y/behavioral proxy rules
 
 set -euo pipefail
 
@@ -33,12 +34,14 @@ PROVIDER_PID=""
 WITH_GOOSE=false
 SKIP_BUILD=false
 SKIP_KANTRA=false
+INCLUDE_TESTING_RULES=false
 LOG_DIR=""
 for arg in "$@"; do
   case $arg in
     --with-goose) WITH_GOOSE=true ;;
     --skip-build) SKIP_BUILD=true ;;
     --skip-kantra) SKIP_KANTRA=true ;;
+    --include-testing-rules) INCLUDE_TESTING_RULES=true ;;
     --log-dir=*) LOG_DIR="${arg#*=}" ;;
     *) echo "Unknown flag: $arg"; exit 1 ;;
   esac
@@ -154,6 +157,13 @@ EOF
   # Run kantra
   info "  Running kantra analyze"
   rm -rf "$OUTPUT_DIR"
+
+  LABEL_SELECTOR_ARGS=""
+  if [ "$INCLUDE_TESTING_RULES" = false ]; then
+    LABEL_SELECTOR_ARGS="--label-selector !impact=frontend-testing"
+    info "  Excluding frontend-testing rules (use --include-testing-rules to include)"
+  fi
+
   kantra analyze \
     --input "$QUIPUCORDS" \
     --output "$OUTPUT_DIR" \
@@ -165,6 +175,7 @@ EOF
     --mode source-only \
     --run-local \
     --provider java \
+    $LABEL_SELECTOR_ARGS \
     2>&1 | grep -v "^time=" | grep -v "^\[" || true
 
   # Stop provider

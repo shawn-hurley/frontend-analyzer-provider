@@ -163,7 +163,7 @@
   message: "LoginMainFooterLinksItem restructured in PF v6. Children should be wrapped in a Button with variant='link' and component='a'. Props like href and linkComponentProps move into the Button child. Codemod: loginMainFooterLinksItem-structure-update"
 
 - ruleID: pfv6-misc-page-toggle-button
-  description: "PageToggleButton: BarsIcon should use isHamburgerButton"
+  description: "PageToggleButton: BarsIcon child should use isHamburgerButton prop"
   labels:
     - change-type=prop-rename
     - has-codemod=true
@@ -171,9 +171,10 @@
   category: mandatory
   when:
     frontend.referenced:
-      pattern: "^PageToggleButton$"
+      pattern: "^BarsIcon$"
       location: JSX_COMPONENT
-  message: "PageToggleButton BarsIcon child should be replaced with the 'isHamburgerButton' prop in PF v6. This also enables button animation. Codemod: pageToggleButton-replace-barsicon"
+      parent: "^(PageToggleButton|Button)$"
+  message: "BarsIcon inside PageToggleButton/Button should be replaced with the 'isHamburgerButton' prop on PageToggleButton in PF v6. Replace <PageToggleButton><BarsIcon /></PageToggleButton> with <PageToggleButton isHamburgerButton />. This also enables button animation. Codemod: pageToggleButton-replace-barsicon"
 
 - ruleID: pfv6-misc-page-breadcrumb-bodywrapper
   description: "PageBreadcrumb: hasBodyWrapper prop needed"

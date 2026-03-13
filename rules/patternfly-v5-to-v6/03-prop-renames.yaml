@@ -88,7 +88,7 @@
   category: mandatory
   when:
     or:
-      - frontend.referenced: { pattern: "^(customChipGroupContent|chipGroupContentRef|chipGroupExpandedText|chipGroupCollapsedText|chips|deleteChip|deleteChipGroup|categoryName)$", location: JSX_PROP }
+      - frontend.referenced: { pattern: "^(customChipGroupContent|chipGroupContentRef|chipGroupExpandedText|chipGroupCollapsedText|chips|deleteChip|deleteChipGroup)$", location: JSX_PROP }
   message: "Toolbar chip-based props renamed to label equivalents in PF v6 (e.g., chips→labels, deleteChip→deleteLabel). Codemod: toolbar-replace-chip-instances"
 
 - ruleID: pfv6-prop-rename-menutoggle-splitbutton
@@ -106,7 +106,9 @@
   effort: 1
   category: mandatory
   when:
-    frontend.referenced: { pattern: "^align$", location: JSX_PROP, component: "^(ToolbarGroup|ToolbarItem|ToolbarToggleGroup)$" }
+    builtin.filecontent:
+      pattern: "alignLeft|alignRight"
+      filePattern: "\\.(tsx|jsx)$"
   message: "Toolbar align values renamed: 'alignLeft'->'alignStart', 'alignRight'->'alignEnd' in PF v6. Codemod: toolbar-replace-align-values"
 
 - ruleID: pfv6-prop-rename-toolbar-chip-interfaces

@@ -1,8 +1,0 @@
-/Users/shurley/repos/ai_harness/frontend-analyzer-provider/target/release/deps/lightningcss_derive-02aad208a65c817a.d: /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/lib.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/parse.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/to_css.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/visit.rs
-
-/Users/shurley/repos/ai_harness/frontend-analyzer-provider/target/release/deps/liblightningcss_derive-02aad208a65c817a.dylib: /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/lib.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/parse.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/to_css.rs /Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/visit.rs
-
-/Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/lib.rs:
-/Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/parse.rs:
-/Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/to_css.rs:
-/Users/shurley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lightningcss-derive-1.0.0-alpha.43/src/visit.rs:
