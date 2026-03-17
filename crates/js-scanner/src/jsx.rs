@@ -367,15 +367,140 @@ fn walk_jsx_child(
         }
         JSXChild::ExpressionContainer(container) => {
             // JSXExpression inherits Expression variants via @inherit macro.
-            // Match EmptyExpression to skip, otherwise it IS an expression.
-            if !matches!(&container.expression, JSXExpression::EmptyExpression(_)) {
-                // The JSXExpression can be treated like an expression for our walk.
-                // We use span-based scanning as a simpler approach.
-                let span = container.expression.span();
-                let text = &source[span.start as usize..span.end as usize];
-                // For JSX expressions, scan the text content for patterns
-                // This is a simplified approach that works for most cases
-                let _ = text; // expression content handled by top-level scan
+            // Walk into the expression to find nested JSX elements.
+            walk_jsx_expression(
+                &container.expression,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Walk a JSXExpression (which inherits all Expression variants) for nested JSX.
+/// This handles expression containers in JSX children ({cond && <X/>}) and
+/// prop value expressions (toggle={ref => (<MenuToggle ...>)}).
+fn walk_jsx_expression(
+    jsx_expr: &JSXExpression<'_>,
+    source: &str,
+    pattern: &Regex,
+    file_uri: &str,
+    location: Option<&ReferenceLocation>,
+    incidents: &mut Vec<Incident>,
+    parent_name: Option<&str>,
+) {
+    match jsx_expr {
+        JSXExpression::EmptyExpression(_) => {}
+        // Direct JSX nesting: {<Component />}
+        JSXExpression::JSXElement(el) => {
+            check_jsx_element(
+                el,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        JSXExpression::JSXFragment(frag) => {
+            for child in &frag.children {
+                walk_jsx_child(
+                    child,
+                    source,
+                    pattern,
+                    file_uri,
+                    location,
+                    incidents,
+                    parent_name,
+                );
+            }
+        }
+        // Parenthesized: {(<Component />)}
+        JSXExpression::ParenthesizedExpression(paren) => {
+            walk_expression_for_jsx(
+                &paren.expression,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        // Arrow functions: {ref => (<Component />)} or {() => <Component />}
+        JSXExpression::ArrowFunctionExpression(arrow) => {
+            walk_function_body(
+                &arrow.body,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        // Conditionals: {condition && <Component />} or {cond ? <A/> : <B/>}
+        JSXExpression::ConditionalExpression(cond) => {
+            walk_expression_for_jsx(
+                &cond.consequent,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+            walk_expression_for_jsx(
+                &cond.alternate,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        JSXExpression::LogicalExpression(logic) => {
+            walk_expression_for_jsx(
+                &logic.right,
+                source,
+                pattern,
+                file_uri,
+                location,
+                incidents,
+                parent_name,
+            );
+        }
+        // Function calls: {renderFn(<Component />)} or {fn(arg)}
+        JSXExpression::CallExpression(call) => {
+            for arg in &call.arguments {
+                if let Argument::SpreadElement(spread) = arg {
+                    walk_expression_for_jsx(
+                        &spread.argument,
+                        source,
+                        pattern,
+                        file_uri,
+                        location,
+                        incidents,
+                        parent_name,
+                    );
+                } else if let Some(expr) = arg.as_expression() {
+                    walk_expression_for_jsx(
+                        expr,
+                        source,
+                        pattern,
+                        file_uri,
+                        location,
+                        incidents,
+                        parent_name,
+                    );
+                }
             }
         }
         _ => {}
@@ -455,6 +580,24 @@ fn check_jsx_element(
                         incidents.push(incident);
                     }
                 }
+            }
+        }
+    }
+
+    // Walk into prop value expressions to find nested JSX elements.
+    // e.g., toggle={ref => (<MenuToggle ...>)} or icon={<Icon />}
+    for attr in &opening.attributes {
+        if let JSXAttributeItem::Attribute(a) = attr {
+            if let Some(JSXAttributeValue::ExpressionContainer(expr)) = &a.value {
+                walk_jsx_expression(
+                    &expr.expression,
+                    source,
+                    pattern,
+                    file_uri,
+                    location,
+                    incidents,
+                    Some(&component_name),
+                );
             }
         }
     }

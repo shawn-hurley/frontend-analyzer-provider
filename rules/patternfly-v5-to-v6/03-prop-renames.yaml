@@ -108,7 +108,7 @@
   when:
     builtin.filecontent:
       pattern: "alignLeft|alignRight"
-      filePattern: "\\.(tsx|jsx)$"
+      filePattern: "\\.(tsx?|jsx)$"
   message: "Toolbar align values renamed: 'alignLeft'->'alignStart', 'alignRight'->'alignEnd' in PF v6. Codemod: toolbar-replace-align-values"
 
 - ruleID: pfv6-prop-rename-toolbar-chip-interfaces

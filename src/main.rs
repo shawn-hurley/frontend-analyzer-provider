@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 
 mod cli;
-mod engine;
 mod fix_engine;
 mod goose_client;
 mod llm_client;
@@ -19,7 +18,6 @@ async fn main() -> Result<()> {
     let args = cli::Cli::parse();
 
     match args.command {
-        cli::Command::Analyze(opts) => cli::analyze::run(opts).await,
         cli::Command::Fix(opts) => cli::fix::run(opts).await,
         cli::Command::Serve(opts) => cli::serve::run(opts).await,
     }

@@ -84,13 +84,13 @@
   message: "Banner 'variant' prop replaced with 'color' in PF v6. Codemod: banner-replace-variantProp"
 
 - ruleID: pfv6-prop-value-menutoggle-variant
-  description: "MenuToggle: variant='plain' split into plainText and typeahead"
+  description: "MenuToggle: variant='plain' may need updating to plainText or typeahead"
   labels: [change-type=prop-value-change, has-codemod=true]
   effort: 1
-  category: mandatory
+  category: potential
   when:
     frontend.referenced: { pattern: "^variant$", location: JSX_PROP, component: "^MenuToggle$", value: "^plain$" }
-  message: "MenuToggle variant='plain' has been split into 'plainText' and 'typeahead' variants in PF v6. Codemod: menuToggle-replace-variant-plain"
+  message: "MenuToggle variant='plain' review needed for PF v6. IMPORTANT: variant='plain' is STILL VALID in PF6 for icon-only toggles (kebab menus, icon buttons, etc.) — do NOT change these. Only change to variant='plainText' if the toggle displays TEXT content without a border, or to variant='typeahead' if used for typeahead search inputs. When in doubt, keep variant='plain'. Codemod: menuToggle-replace-variant-plain"
 
 - ruleID: pfv6-prop-value-pagesection-variant
   description: "PageSection: variant values narrowed"

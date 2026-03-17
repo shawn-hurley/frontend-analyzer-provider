@@ -5,20 +5,18 @@
 # Steps:
 #   1. Clone quipucords-ui (or use existing) and reset to v5 commit
 #   2. Build the provider
-#   3. Start the gRPC provider
-#   4. Run kantra analysis (frontend + builtin providers)
-#   5. Convert output to JSON
-#   6. Apply pattern-based fixes
-#   7. Apply goose LLM fixes (optional, requires --with-goose)
-#   8. Re-analyze to measure improvement
-#   9. Compare against real v6 migration
+#   3. Start provider + run kantra analysis
+#   4. Apply pattern-based fixes
+#   5. Apply LLM fixes (enabled by default, skip with --no-llm)
+#   6. Re-analyze with kantra to measure improvement
+#   7. Compare against real v6 migration
 #
 # Usage:
-#   ./hack/run-full-migration.sh                        # pattern fixes only
-#   ./hack/run-full-migration.sh --with-goose           # pattern + goose LLM fixes
+#   ./hack/run-full-migration.sh                        # pattern + LLM fixes (default)
+#   ./hack/run-full-migration.sh --no-llm               # pattern fixes only, skip LLM
 #   ./hack/run-full-migration.sh --skip-build           # skip cargo build
-#   ./hack/run-full-migration.sh --skip-kantra          # use standalone analyze instead of kantra
 #   ./hack/run-full-migration.sh --include-testing-rules # include DOM/CSS/a11y/behavioral proxy rules
+#   ./hack/run-full-migration.sh --llm-provider openai  # use OpenAI-compatible endpoint instead of goose
 
 set -euo pipefail
 
@@ -31,16 +29,18 @@ PROVIDER_PORT=9001
 PROVIDER_PID=""
 
 # Parse flags
-WITH_GOOSE=false
+WITH_LLM=true
+LLM_PROVIDER="goose"
 SKIP_BUILD=false
-SKIP_KANTRA=false
 INCLUDE_TESTING_RULES=false
 LOG_DIR=""
 for arg in "$@"; do
   case $arg in
-    --with-goose) WITH_GOOSE=true ;;
+    --with-goose) WITH_LLM=true; LLM_PROVIDER="goose" ;;  # backward compat
+    --with-llm) WITH_LLM=true ;;                            # explicit enable
+    --no-llm|--skip-llm) WITH_LLM=false ;;
+    --llm-provider=*) LLM_PROVIDER="${arg#*=}"; WITH_LLM=true ;;
     --skip-build) SKIP_BUILD=true ;;
-    --skip-kantra) SKIP_KANTRA=true ;;
     --include-testing-rules) INCLUDE_TESTING_RULES=true ;;
     --log-dir=*) LOG_DIR="${arg#*=}" ;;
     *) echo "Unknown flag: $arg"; exit 1 ;;
@@ -109,24 +109,65 @@ if [ ! -f "$BINARY" ]; then
   exit 1
 fi
 
-# ── Step 3: Analyze ───────────────────────────────────────────────────────
+# ── Analysis helper ────────────────────────────────────────────────────────
+# Runs kantra analysis and writes JSON output.
+# Usage: run_kantra_analysis <output_json> <label>
+run_kantra_analysis() {
+  local out_json="$1"
+  local label="$2"
+  local kantra_out="$WORK_DIR/kantra-output-${label}"
 
-if [ "$SKIP_KANTRA" = true ]; then
-  # Standalone analysis (no kantra)
-  info "Step 3: Running standalone analysis"
-  "$BINARY" analyze \
+  # Ensure provider is running
+  if [ -z "$PROVIDER_PID" ] || ! kill -0 "$PROVIDER_PID" 2>/dev/null; then
+    info "  Starting frontend provider on port $PROVIDER_PORT"
+    kill $(lsof -ti :"$PROVIDER_PORT") 2>/dev/null || true
+    sleep 1
+    "$BINARY" serve --port "$PROVIDER_PORT" 2>"$WORK_DIR/provider.log" &
+    PROVIDER_PID=$!
+    sleep 2
+
+    if ! kill -0 "$PROVIDER_PID" 2>/dev/null; then
+      fail "Provider failed to start. Check $WORK_DIR/provider.log"
+      exit 1
+    fi
+    ok "  Provider running (PID $PROVIDER_PID)"
+  fi
+
+  rm -rf "$kantra_out"
+
+  LABEL_SELECTOR_ARGS=""
+  if [ "$INCLUDE_TESTING_RULES" = false ]; then
+    LABEL_SELECTOR_ARGS="--label-selector !impact=frontend-testing"
+  fi
+
+  kantra analyze \
+    --input "$QUIPUCORDS" \
+    --output "$kantra_out" \
     --rules "$RULES_DIR" \
-    "$QUIPUCORDS" \
-    --output "$ANALYSIS_JSON" \
-    --output-format json \
-    2>&1 | grep -E "Rules matched|Total incidents|Analysis complete"
-  ok "Analysis written to $ANALYSIS_JSON"
-else
-  # Kantra analysis (with builtin provider for filecontent rules)
-  info "Step 3: Running kantra analysis"
+    --override-provider-settings "$WORK_DIR/provider_settings.json" \
+    --enable-default-rulesets=false \
+    --skip-static-report \
+    --no-dependency-rules \
+    --mode source-only \
+    --run-local \
+    --provider java \
+    $LABEL_SELECTOR_ARGS \
+    2>&1 | grep -v "^time=" | grep -v "^\[" || true
 
-  # Write provider settings pointing to the project
-  cat > "$WORK_DIR/provider_settings.json" <<EOF
+  if [ -f "$kantra_out/output.yaml" ]; then
+    yq -o json "$kantra_out/output.yaml" > "$out_json"
+  else
+    fail "Kantra did not produce output.yaml for $label"
+    exit 1
+  fi
+}
+
+# ── Step 3: Start provider + initial analysis ──────────────────────────────
+
+info "Step 3: Running kantra analysis"
+
+# Write provider settings pointing to the project
+cat > "$WORK_DIR/provider_settings.json" <<EOF
 [
   {
     "name": "frontend",
@@ -140,59 +181,12 @@ else
 ]
 EOF
 
-  # Start gRPC provider
-  info "  Starting frontend provider on port $PROVIDER_PORT"
-  kill $(lsof -ti :"$PROVIDER_PORT") 2>/dev/null || true
-  sleep 1
-  "$BINARY" serve --port "$PROVIDER_PORT" 2>"$WORK_DIR/provider.log" &
-  PROVIDER_PID=$!
-  sleep 2
-
-  if ! kill -0 "$PROVIDER_PID" 2>/dev/null; then
-    fail "Provider failed to start. Check $WORK_DIR/provider.log"
-    exit 1
-  fi
-  ok "Provider running (PID $PROVIDER_PID)"
-
-  # Run kantra
-  info "  Running kantra analyze"
-  rm -rf "$OUTPUT_DIR"
-
-  LABEL_SELECTOR_ARGS=""
-  if [ "$INCLUDE_TESTING_RULES" = false ]; then
-    LABEL_SELECTOR_ARGS="--label-selector !impact=frontend-testing"
-    info "  Excluding frontend-testing rules (use --include-testing-rules to include)"
-  fi
-
-  kantra analyze \
-    --input "$QUIPUCORDS" \
-    --output "$OUTPUT_DIR" \
-    --rules "$RULES_DIR" \
-    --override-provider-settings "$WORK_DIR/provider_settings.json" \
-    --enable-default-rulesets=false \
-    --skip-static-report \
-    --no-dependency-rules \
-    --mode source-only \
-    --run-local \
-    --provider java \
-    $LABEL_SELECTOR_ARGS \
-    2>&1 | grep -v "^time=" | grep -v "^\[" || true
-
-  # Stop provider
-  info "  Stopping provider"
-  kill "$PROVIDER_PID" 2>/dev/null || true
-  wait "$PROVIDER_PID" 2>/dev/null || true
-  PROVIDER_PID=""
-
-  # Convert YAML → JSON
-  if [ -f "$OUTPUT_DIR/output.yaml" ]; then
-    yq -o json "$OUTPUT_DIR/output.yaml" > "$ANALYSIS_JSON"
-    ok "Analysis written to $ANALYSIS_JSON"
-  else
-    fail "Kantra did not produce output.yaml"
-    exit 1
-  fi
+if [ "$INCLUDE_TESTING_RULES" = false ]; then
+  info "  Excluding frontend-testing rules (use --include-testing-rules to include)"
 fi
+
+run_kantra_analysis "$ANALYSIS_JSON" "initial"
+ok "Analysis written to $ANALYSIS_JSON"
 
 # Count incidents
 BEFORE_RULES=$(python3 -c "
@@ -211,54 +205,71 @@ info "Step 4: Applying pattern-based fixes"
 "$BINARY" fix "$QUIPUCORDS" --input "$ANALYSIS_JSON" --apply
 ok "Pattern-based fixes applied"
 
-# ── Step 5: Apply goose LLM fixes (optional) ──────────────────────────────
+# ── Step 5: Apply LLM fixes ────────────────────────────────────────────────
 
-if [ "$WITH_GOOSE" = true ]; then
-  info "Step 5: Applying goose LLM fixes"
+if [ "$WITH_LLM" = true ]; then
+  info "Step 5: Applying LLM fixes (provider: $LLM_PROVIDER)"
 
-  # Re-analyze after pattern fixes so goose sees the updated code
-  info "  Re-analyzing after pattern fixes"
-  "$BINARY" analyze \
-    --rules "$RULES_DIR" \
-    "$QUIPUCORDS" \
-    --output "$WORK_DIR/post-pattern-analysis.json" \
-    --output-format json \
-    2>&1 | grep -E "Rules matched|Total incidents"
+  # Re-analyze after pattern fixes so the LLM sees the updated code
+  info "  Re-analyzing after pattern fixes (kantra)"
+  run_kantra_analysis "$WORK_DIR/post-pattern-analysis.json" "post-pattern"
 
-  GOOSE_LOG_ARGS=""
+  POST_PATTERN_INCIDENTS=$(python3 -c "
+import json
+with open('$WORK_DIR/post-pattern-analysis.json') as f:
+    data = json.load(f)
+incidents = sum(len(v.get('incidents', [])) for e in data for v in e.get('violations', {}).values())
+print(incidents)
+")
+  info "  Remaining incidents after pattern fixes: $POST_PATTERN_INCIDENTS"
+
+  LLM_EXTRA_ARGS=""
   if [ -n "$LOG_DIR" ]; then
     mkdir -p "$LOG_DIR"
-    GOOSE_LOG_ARGS="--log-dir $LOG_DIR"
+    LLM_EXTRA_ARGS="--log-dir $LOG_DIR"
   fi
 
+  LLM_EXIT=0
   "$BINARY" fix "$QUIPUCORDS" \
     --input "$WORK_DIR/post-pattern-analysis.json" \
-    --llm-provider goose \
+    --llm-provider "$LLM_PROVIDER" \
     --apply \
     --verbose \
-    $GOOSE_LOG_ARGS
-  ok "Goose LLM fixes applied"
+    $LLM_EXTRA_ARGS || LLM_EXIT=$?
+
+  if [ "$LLM_EXIT" -eq 0 ]; then
+    ok "LLM fixes applied (provider: $LLM_PROVIDER)"
+  else
+    warn "LLM fix step exited with code $LLM_EXIT (interrupted or error)"
+    warn "Continuing with partial LLM fixes applied so far"
+  fi
 else
-  info "Step 5: Skipping goose LLM fixes (use --with-goose to enable)"
+  info "Step 5: Skipping LLM fixes (use --with-llm to enable, or remove --no-llm)"
 fi
 
 # ── Step 6: Re-analyze and measure improvement ────────────────────────────
 
-info "Step 6: Re-analyzing to measure improvement"
-"$BINARY" analyze \
-  --rules "$RULES_DIR" \
-  "$QUIPUCORDS" \
-  --output "$WORK_DIR/after-analysis.json" \
-  --output-format json \
-  2>&1 | grep -E "Rules matched|Total incidents"
+info "Step 6: Re-analyzing to measure improvement (kantra)"
+run_kantra_analysis "$WORK_DIR/after-analysis.json" "final"
 
 python3 <<PYEOF
-import json
+import json, os
 
 with open("$ANALYSIS_JSON") as f:
     before = json.load(f)
 with open("$WORK_DIR/after-analysis.json") as f:
     after = json.load(f)
+
+# Load post-pattern analysis if LLM fixes were applied
+post_pattern_path = "$WORK_DIR/post-pattern-analysis.json"
+post_pattern_counts = None
+if os.path.exists(post_pattern_path) and "$WITH_LLM" == "true":
+    with open(post_pattern_path) as f:
+        post_pattern = json.load(f)
+    post_pattern_counts = {}
+    for entry in post_pattern:
+        for rule_id, v in entry.get("violations", {}).items():
+            post_pattern_counts[rule_id] = len(v["incidents"])
 
 before_counts = {}
 after_counts = {}
@@ -273,15 +284,29 @@ total_before = sum(before_counts.values())
 total_after = sum(after_counts.values())
 resolved = set(before_counts) - set(after_counts)
 fixed = total_before - total_after
+pct = fixed * 100 // max(total_before, 1)
 
 print()
-print("═══════════════════════════════════════════════")
+print("═══════════════════════════════════════════════════════════")
 print("  MIGRATION RESULTS")
-print("═══════════════════════════════════════════════")
-print(f"  Before:  {total_before} incidents across {len(before_counts)} rules")
-print(f"  After:   {total_after} incidents across {len(after_counts)} rules")
-print(f"  Fixed:   {fixed} incidents ({fixed*100//max(total_before,1)}%)")
-print(f"  Rules fully resolved: {len(resolved)}")
+print("═══════════════════════════════════════════════════════════")
+print(f"  Initial analysis:   {total_before} incidents across {len(before_counts)} rules")
+
+if post_pattern_counts is not None:
+    total_post_pattern = sum(post_pattern_counts.values())
+    pattern_fixed = total_before - total_post_pattern
+    pattern_pct = pattern_fixed * 100 // max(total_before, 1)
+    llm_fixed = total_post_pattern - total_after
+    llm_pct = llm_fixed * 100 // max(total_post_pattern, 1)
+    print(f"  After pattern fixes: {total_post_pattern} incidents ({pattern_fixed} fixed, {pattern_pct}%)")
+    print(f"  After LLM fixes:    {total_after} incidents ({llm_fixed} fixed, {llm_pct}% of remaining)")
+else:
+    print(f"  After fixes:        {total_after} incidents across {len(after_counts)} rules")
+
+print(f"  ─────────────────────────────────────────────")
+print(f"  Total fixed:        {fixed} / {total_before} incidents ({pct}%)")
+print(f"  Remaining:          {total_after} incidents across {len(after_counts)} rules")
+print(f"  Rules fully resolved: {len(resolved)} / {len(before_counts)}")
 print()
 
 if resolved:
@@ -290,16 +315,29 @@ if resolved:
         print(f"    ✓ {r} ({before_counts[r]} incidents)")
     print()
 
+partially_fixed = []
+unfixed = []
 remaining = set(before_counts) & set(after_counts)
-if remaining:
-    print("  Remaining rules:")
-    for r in sorted(remaining):
-        b, a = before_counts[r], after_counts[r]
-        if a < b:
-            print(f"    ◐ {r}: {b} → {a} ({b-a} fixed)")
-        else:
-            print(f"    ○ {r}: {a} incidents")
-print("═══════════════════════════════════════════════")
+for r in sorted(remaining):
+    b, a = before_counts[r], after_counts[r]
+    if a < b:
+        partially_fixed.append((r, b, a))
+    else:
+        unfixed.append((r, a))
+
+if partially_fixed:
+    print("  Partially fixed rules:")
+    for r, b, a in partially_fixed:
+        print(f"    ◐ {r}: {b} → {a} ({b-a} fixed, {a} remaining)")
+    print()
+
+if unfixed:
+    print("  Unfixed rules (no change):")
+    for r, a in unfixed:
+        print(f"    ○ {r}: {a} incidents")
+    print()
+
+print("═══════════════════════════════════════════════════════════")
 PYEOF
 
 # ── Step 7: Compare against real v6 ──────────────────────────────────────

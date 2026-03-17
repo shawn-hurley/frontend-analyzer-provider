@@ -245,29 +245,187 @@ frontend-analyzer-provider analyze ./my-project \
 
 ## End-to-End Migration Script
 
-The `hack/run-full-migration.sh` script automates the entire pipeline against a test project ([quipucords-ui](https://github.com/jwmatthews/quipucords-ui)):
+The `hack/run-full-migration.sh` script automates the entire pipeline against a test project ([quipucords-ui](https://github.com/jwmatthews/quipucords-ui)). By default it runs both pattern-based and LLM-assisted fixes:
 
 ```bash
-# Pattern fixes only
+# Full pipeline: pattern + LLM fixes (default)
 ./hack/run-full-migration.sh
 
-# Pattern + goose LLM fixes
-./hack/run-full-migration.sh --with-goose
+# Pattern fixes only, skip LLM
+./hack/run-full-migration.sh --no-llm
 
 # Skip the cargo build step
 ./hack/run-full-migration.sh --skip-build
 
-# Use standalone analyze instead of kantra
-./hack/run-full-migration.sh --skip-kantra
-
 # Include testing/proxy rules
 ./hack/run-full-migration.sh --include-testing-rules
 
-# Save goose prompts/responses
-./hack/run-full-migration.sh --with-goose --log-dir=/tmp/goose-logs
+# Use an OpenAI-compatible endpoint instead of goose
+./hack/run-full-migration.sh --llm-provider=openai
+
+# Save LLM prompts/responses for debugging
+./hack/run-full-migration.sh --log-dir=/tmp/llm-logs
 ```
 
-The script clones the test project, resets it to a known v5 commit, runs analysis, applies fixes, re-analyzes to measure improvement, and compares the result against the real v6 migration branch.
+| Flag | Description |
+|---|---|
+| `--no-llm` / `--skip-llm` | Skip the LLM fix step (pattern fixes only) |
+| `--llm-provider=<name>` | LLM backend to use: `goose` (default) or `openai` |
+| `--with-goose` | Backward-compatible alias for `--with-llm` (goose is already the default) |
+| `--skip-build` | Skip `cargo build --release` |
+| `--include-testing-rules` | Include DOM/CSS/a11y/behavioral proxy rules (excluded by default) |
+| `--log-dir=<DIR>` | Save LLM prompts and responses to this directory |
+
+All analysis is done via kantra with the gRPC provider, ensuring full rule engine support (including `not` conditions, `or` combinators, and label selectors). The provider is started once and kept alive for the duration of the pipeline.
+
+The pipeline steps are:
+
+1. **Clone/reset** quipucords-ui to the v5 base commit (`3b3ce52`)
+2. **Build** the provider binary (`cargo build --release`)
+3. **Start provider + kantra analysis** of the v5 codebase
+4. **Pattern fixes** -- deterministic renames, prop removals, CSS prefix changes
+5. **LLM fixes** -- re-analyze with kantra after pattern fixes, then send remaining violations to the LLM
+6. **Re-analyze with kantra** and print a results report (before/after incident counts, resolved rules, partially fixed rules)
+7. **Compare** the automated result against the real human-authored v6 migration
+
+### Results output
+
+The results report breaks down fix effectiveness at each stage:
+
+```
+═══════════════════════════════════════════════════════════
+  MIGRATION RESULTS
+═══════════════════════════════════════════════════════════
+  Initial analysis:    150 incidents across 25 rules
+  After pattern fixes: 45 incidents (105 fixed, 70%)
+  After LLM fixes:     12 incidents (33 fixed, 73% of remaining)
+  ─────────────────────────────────────────────────────────
+  Total fixed:         138 / 150 incidents (92%)
+  Remaining:           12 incidents across 5 rules
+  Rules fully resolved: 20 / 25
+
+  Fully resolved rules:
+    ✓ pfv6-component-rename-chip (15 incidents)
+    ✓ pfv6-css-prefix-v5-to-v6 (42 incidents)
+    ...
+
+  Partially fixed rules:
+    ◐ pfv6-modal-deprecated: 8 → 3 (5 fixed, 3 remaining)
+    ...
+
+  Unfixed rules (no change):
+    ○ pfv6-some-complex-rule: 2 incidents
+═══════════════════════════════════════════════════════════
+```
+
+When `--no-llm` is used, the "After pattern fixes" / "After LLM fixes" breakdown is replaced with a single "After fixes" line.
+
+---
+
+## Comparing Against a Release
+
+After running the migration, use the helper scripts in `hack/` to assess quality against the official upstream v6 migration.
+
+### `compare-against-release.sh`
+
+Compares your automated migration working tree against an official `quipucords-ui` release tag. It isolates only the PF6 migration commit from the upstream release (filtering out post-migration feature work) so the comparison is apples-to-apples.
+
+```bash
+# Compare against 2.2.0 (default)
+./hack/compare-against-release.sh
+
+# Compare against a different release tag
+./hack/compare-against-release.sh --tag 2.3.0
+
+# Include per-file gap details (what specific changes we're missing)
+./hack/compare-against-release.sh --gaps
+
+# Write per-file diffs to disk for review
+./hack/compare-against-release.sh --diffs
+
+# Write diffs to a custom directory
+./hack/compare-against-release.sh --diff-dir /tmp/my-diffs
+
+# Override the migration commit used for comparison
+./hack/compare-against-release.sh --migration-commit abc1234
+
+# Point at a custom repo path
+./hack/compare-against-release.sh --repo /path/to/quipucords-ui
+```
+
+| Flag | Description |
+|---|---|
+| `--tag <version>` | Release tag to compare against (default: `2.2.0`) |
+| `--migration-commit <hash>` | Override the official migration commit (default: `6a8b6a7`) |
+| `--repo <path>` | Path to the migration-test repo |
+| `--gaps` | Show per-file gap details for partial/different files (categorizes missing changes by type) |
+| `--diffs` | Write per-file `.diff` files to `/tmp/quipucords-migration-test/diffs/` |
+| `--diff-dir <path>` | Write per-file `.diff` files to a custom directory |
+
+**What the output shows:**
+
+- **File Coverage** -- how many official migration files we touched vs missed
+- **Per-File Comparison** -- for overlapping files, rates each as MATCH (identical), PARTIAL (>=70% similar), or DIFFERENT (<70% similar), with similarity percentages
+- **Files we missed** -- files the official migration changed that we didn't touch, with change summaries (imports, CSS classes, prop changes, Modal migration, etc.)
+- **Extra files** -- files we changed that the official migration didn't
+
+With `--gaps`, the per-file gap analysis categorizes remaining differences: deprecated import paths, Modal API shims, `hasBodyWrapper`, `size="sm"`, `hasAction`, Title wrapping, Icon status wrappers, async test fixes, `popperProps`/`ouiaId`, table props, Avatar, theme classes, align renames, PageSection variant, EmptyState, etc.
+
+With `--diffs`, output is organized into three directories:
+
+```
+diffs/
+├── missing/   # Files official changed, we didn't (shows official diff)
+├── gaps/      # Files both changed (3-way diff: official, ours, delta)
+└── extra/     # Files we changed, official didn't (shows our diff)
+```
+
+**Prerequisites:** The migration-test repo must exist at `/tmp/quipucords-migration-test/quipucords-ui` (created by `run-full-migration.sh`). The script automatically adds the upstream remote and fetches tags.
+
+### `show-migration-gaps.sh`
+
+Provides a detailed per-file gap analysis between the automated migration and an official release. More focused than `compare-against-release.sh` -- it classifies every file and provides actionable summaries.
+
+```bash
+# Full report of all files
+./hack/show-migration-gaps.sh
+
+# Only show files with gaps or missing changes (hide matches and extras)
+./hack/show-migration-gaps.sh --only-gaps
+
+# Show actual diffs inline
+./hack/show-migration-gaps.sh --diff
+
+# Analyze a single file in detail
+./hack/show-migration-gaps.sh --file src/app/views/Credentials/CredentialModal.tsx
+
+# Compare against a specific tag
+./hack/show-migration-gaps.sh --tag 2.3.0
+```
+
+| Flag | Description |
+|---|---|
+| `--tag <version>` | Release tag to compare against (default: `2.2.0`) |
+| `--migration-commit <hash>` | Override the official migration commit (default: `6a8b6a7`) |
+| `--file <path>` | Analyze a single file in detail |
+| `--only-gaps` | Hide MATCH and EXTRA files, only show GAP and MISSING |
+| `--diff` | Show actual diff content inline |
+| `--repo <path>` | Path to the migration-test repo |
+
+**File statuses:**
+
+| Status | Meaning |
+|--------|---------|
+| **MATCH** | Our version is identical to the official migration |
+| **GAP** | Both modified the file, but our version differs |
+| **MISSING** | Official migration changed this file, but we didn't touch it |
+| **EXTRA** | We changed this file, but the official migration didn't |
+
+The summary section includes:
+
+- **Exact match rate** -- percentage of official files we reproduced exactly
+- **Coverage rate** -- percentage of official files we at least touched (MATCH + GAP)
+- **Action Items** -- lists files to add to migration rules and files needing improvement, with the number of differing lines for each
 
 ---
 

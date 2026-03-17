@@ -1,4 +1,3 @@
-pub mod analyze;
 pub mod fix;
 pub mod serve;
 
@@ -17,9 +16,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Analyze a project using Konveyor rules, output violations in Konveyor format.
-    Analyze(analyze::AnalyzeOpts),
-
     /// Apply fixes based on Konveyor analysis output.
     Fix(fix::FixOpts),
 

@@ -8,6 +8,19 @@ use frontend_core::fix::LlmFixRequest;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+/// Per-file timeout for goose subprocess (seconds).
+const GOOSE_TIMEOUT_SECS: u64 = 120;
+
+/// Delay between consecutive goose calls to avoid rate limiting (seconds).
+const GOOSE_DELAY_SECS: u64 = 2;
+
+/// Maximum retries when a goose call times out.
+const GOOSE_MAX_RETRIES: u32 = 1;
 
 /// Result of a goose fix attempt.
 #[derive(Debug)]
@@ -18,38 +31,111 @@ pub struct GooseFixResult {
     pub output: String,
 }
 
+/// Run a goose command with a timeout. Returns the combined stdout+stderr
+/// output, or an error if the process times out or fails to start.
+fn run_goose_with_timeout(prompt: &str, max_turns: &str) -> Result<(bool, String)> {
+    let mut cmd = Command::new("goose");
+    cmd.args([
+        "run",
+        "--quiet",
+        "--text",
+        prompt,
+        "--with-builtin",
+        "developer",
+        "--no-session",
+        "--max-turns",
+        max_turns,
+    ])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .stdin(std::process::Stdio::null());
+
+    // Isolate goose in its own process group so that signals sent by
+    // goose's child processes (e.g., claude-code) cannot propagate to
+    // our parent process.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd
+        .spawn()
+        .context("Failed to execute goose. Is it installed and in PATH?")?;
+
+    let timeout = Duration::from_secs(GOOSE_TIMEOUT_SECS);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Process exited
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+                let combined = if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}\n{}", stdout, stderr)
+                };
+                return Ok((status.success(), combined));
+            }
+            Ok(None) => {
+                // Still running — check timeout
+                if start.elapsed() >= timeout {
+                    // Kill the entire process group (goose + any children like
+                    // claude-code) to prevent orphaned processes.
+                    #[cfg(unix)]
+                    {
+                        let pid = child.id() as i32;
+                        // SIGTERM first to allow graceful shutdown
+                        unsafe {
+                            libc::kill(-pid, libc::SIGTERM);
+                        }
+                        std::thread::sleep(Duration::from_millis(1000));
+                        // SIGKILL to ensure cleanup
+                        unsafe {
+                            libc::kill(-pid, libc::SIGKILL);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    anyhow::bail!("goose timed out after {}s", GOOSE_TIMEOUT_SECS);
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to wait on goose process: {}", e);
+            }
+        }
+    }
+}
+
 /// Run goose to fix a single incident.
 pub fn run_goose_fix(request: &LlmFixRequest) -> Result<GooseFixResult> {
     let prompt = build_prompt(request);
-
-    let output = Command::new("goose")
-        .args([
-            "run",
-            "--quiet",
-            "--text",
-            &prompt,
-            "--with-builtin",
-            "developer",
-            "--no-session",
-            "--max-turns",
-            "5",
-        ])
-        .output()
-        .context("Failed to execute goose. Is it installed and in PATH?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = if stderr.is_empty() {
-        stdout.clone()
-    } else {
-        format!("{}\n{}", stdout, stderr)
-    };
+    let (success, output) = run_goose_with_timeout(&prompt, "5")?;
 
     Ok(GooseFixResult {
         file_path: request.file_path.clone(),
         rule_id: request.rule_id.clone(),
-        success: output.status.success(),
-        output: combined,
+        success,
+        output,
     })
 }
 
@@ -59,29 +145,7 @@ pub fn run_goose_fix_batch(
     requests: &[&LlmFixRequest],
 ) -> Result<GooseFixResult> {
     let prompt = build_batch_prompt(file_path, requests);
-
-    let output = Command::new("goose")
-        .args([
-            "run",
-            "--quiet",
-            "--text",
-            &prompt,
-            "--with-builtin",
-            "developer",
-            "--no-session",
-            "--max-turns",
-            "8",
-        ])
-        .output()
-        .context("Failed to execute goose. Is it installed and in PATH?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = if stderr.is_empty() {
-        stdout.clone()
-    } else {
-        format!("{}\n{}", stdout, stderr)
-    };
+    let (success, output) = run_goose_with_timeout(&prompt, "8")?;
 
     Ok(GooseFixResult {
         file_path: file_path.clone(),
@@ -90,8 +154,8 @@ pub fn run_goose_fix_batch(
             .map(|r| r.rule_id.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        success: output.status.success(),
-        output: combined,
+        success,
+        output,
     })
 }
 
@@ -155,11 +219,36 @@ pub fn run_all_goose_fixes(
 
         let file_start = std::time::Instant::now();
 
-        let result = if file_requests.len() == 1 {
+        // Run with retry on timeout
+        let mut result = if file_requests.len() == 1 {
             run_goose_fix(file_requests[0])
         } else {
             run_goose_fix_batch(file_path, file_requests)
         };
+
+        // Retry on timeout
+        for retry in 0..GOOSE_MAX_RETRIES {
+            if let Err(ref e) = result {
+                if format!("{}", e).contains("timed out") {
+                    let backoff = Duration::from_secs(5 * (retry as u64 + 1));
+                    eprintln!(
+                        "\r         goose: timed out, retrying after {}s backoff...",
+                        backoff.as_secs()
+                    );
+                    std::thread::sleep(backoff);
+                    eprint!("         goose: retry {}...", retry + 1);
+                    result = if file_requests.len() == 1 {
+                        run_goose_fix(file_requests[0])
+                    } else {
+                        run_goose_fix_batch(file_path, file_requests)
+                    };
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
 
         let elapsed = file_start.elapsed();
 
@@ -224,6 +313,11 @@ pub fn run_all_goose_fixes(
             }
         }
         eprintln!();
+
+        // Delay between calls to avoid rate limiting
+        if i + 1 < total_files && GOOSE_DELAY_SECS > 0 {
+            std::thread::sleep(Duration::from_secs(GOOSE_DELAY_SECS));
+        }
     }
 
     let total_elapsed = pipeline_start.elapsed();

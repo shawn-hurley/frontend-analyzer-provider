@@ -95,8 +95,17 @@ pub fn apply_fixes(plan: &FixPlan) -> Result<FixResult> {
         let mut lines: Vec<String> = source.lines().map(String::from).collect();
         let mut any_changed = false;
 
+        // Deduplicate edits: when multiple incidents generate the same whole-file
+        // rename, we get duplicate (line, old_text, new_text) tuples. Only apply each once.
+        let mut seen_edits: std::collections::HashSet<(u32, String, String)> =
+            std::collections::HashSet::new();
+
         for fix in fixes {
             for edit in &fix.edits {
+                let key = (edit.line, edit.old_text.clone(), edit.new_text.clone());
+                if !seen_edits.insert(key) {
+                    continue; // already applied this exact edit
+                }
                 let idx = (edit.line as usize).saturating_sub(1);
                 if idx < lines.len() {
                     let line = &lines[idx];
@@ -224,50 +233,121 @@ fn plan_rename(
     // Determine what text to look for from incident variables
     let matched_text = get_matched_text(incident);
 
-    // Try to find a mapping that matches the incident's matched text
-    let mapping = mappings.iter().find(|m| m.old == matched_text);
+    // Check if this is a component/import rename (detected via importedName variable).
+    // For these, we need to scan the entire file since JSX usage of the component
+    // appears on many lines beyond the import.
+    let is_import_rename = incident.variables.contains_key("importedName");
 
-    if let Some(mapping) = mapping {
-        // Bug 2 fix: skip no-op renames (old == new)
+    // Try to find a mapping that matches the incident's matched text
+    let primary_mapping = mappings.iter().find(|m| m.old == matched_text);
+
+    // Read the file — we always need it for value-level scans and whole-file renames
+    let source = std::fs::read_to_string(file_path).ok()?;
+    let mut edits = Vec::new();
+
+    if is_import_rename {
+        // Component/import rename: scan the ENTIRE file for all occurrences of
+        // every mapping's old value. This catches imports, JSX opening tags
+        // (<TextContent>), closing tags (</TextContent>), and type references.
+        //
+        // Sort mappings longest-first to avoid substring false matches:
+        // e.g., "TextContent" should be matched before "Text" since "Text"
+        // is a substring of "TextContent".
+        let mut sorted_mappings: Vec<&RenameMapping> =
+            mappings.iter().filter(|m| m.old != m.new).collect();
+        sorted_mappings.sort_by(|a, b| b.old.len().cmp(&a.old.len()));
+
+        for (idx, file_line) in source.lines().enumerate() {
+            let line_num = (idx + 1) as u32;
+            // Track which ranges on this line have been claimed by longer mappings
+            // to prevent shorter substring matches from generating duplicate edits.
+            let mut consumed: Vec<&str> = Vec::new();
+            for m in &sorted_mappings {
+                if file_line.contains(m.old.as_str()) {
+                    // Skip if a longer mapping already covers this match.
+                    // e.g., skip "Text" if "TextContent" already matched on this line.
+                    let is_substring_of_consumed =
+                        consumed.iter().any(|c| c.contains(m.old.as_str()));
+                    if is_substring_of_consumed {
+                        continue;
+                    }
+                    edits.push(TextEdit {
+                        line: line_num,
+                        old_text: m.old.clone(),
+                        new_text: m.new.clone(),
+                        rule_id: rule_id.to_string(),
+                        description: format!("Rename '{}' to '{}'", m.old, m.new),
+                    });
+                    consumed.push(&m.old);
+                }
+            }
+        }
+    } else if let Some(mapping) = primary_mapping {
+        // Standard rename: apply the primary mapping on the incident line
         if mapping.old == mapping.new {
             return None;
         }
-        return Some(PlannedFix {
-            edits: vec![TextEdit {
-                line,
-                old_text: mapping.old.clone(),
-                new_text: mapping.new.clone(),
-                rule_id: rule_id.to_string(),
-                description: format!("Rename '{}' to '{}'", mapping.old, mapping.new),
-            }],
-            confidence: FixConfidence::Exact,
-            source: FixSource::Pattern,
-            rule_id: rule_id.to_string(),
-            file_uri: incident.uri.clone(),
+        edits.push(TextEdit {
             line,
-            description: format!("Rename '{}' → '{}'", mapping.old, mapping.new),
+            old_text: mapping.old.clone(),
+            new_text: mapping.new.clone(),
+            rule_id: rule_id.to_string(),
+            description: format!("Rename '{}' to '{}'", mapping.old, mapping.new),
         });
-    }
 
-    // For prop-value-change and CSS rules: the incident captures the prop name
-    // or class name, but the mappings contain the value-level renames.
-    // Read the actual line and apply all applicable mappings.
-    let source = std::fs::read_to_string(file_path).ok()?;
-    let file_line = source.lines().nth((line as usize).saturating_sub(1))?;
-
-    let mut edits = Vec::new();
-    for m in mappings {
-        if m.old == m.new {
-            continue;
+        // Also scan the incident line for value-level renames from other mappings.
+        // e.g., when the prop key `spacer` -> `gap` is the primary match, also
+        // rename `spacerNone` -> `gapNone`, `spacerMd` -> `gapMd` etc. on the
+        // same line or nearby lines in the same prop value expression.
+        let line_idx = (line as usize).saturating_sub(1);
+        // Scan a small window around the incident line to catch multi-line prop values
+        let scan_start = line_idx.saturating_sub(3);
+        let scan_end = (line_idx + 5).min(source.lines().count());
+        for (idx, file_line) in source
+            .lines()
+            .enumerate()
+            .skip(scan_start)
+            .take(scan_end - scan_start)
+        {
+            let line_num = (idx + 1) as u32;
+            for m in mappings {
+                if m.old == m.new {
+                    continue;
+                }
+                // Skip the primary mapping on the primary line (already added)
+                if std::ptr::eq(m, mapping) && line_num == line {
+                    continue;
+                }
+                if file_line.contains(&m.old) {
+                    edits.push(TextEdit {
+                        line: line_num,
+                        old_text: m.old.clone(),
+                        new_text: m.new.clone(),
+                        rule_id: rule_id.to_string(),
+                        description: format!("Rename '{}' to '{}'", m.old, m.new),
+                    });
+                }
+            }
         }
-        if file_line.contains(&m.old) {
-            edits.push(TextEdit {
-                line,
-                old_text: m.old.clone(),
-                new_text: m.new.clone(),
-                rule_id: rule_id.to_string(),
-                description: format!("Rename '{}' to '{}'", m.old, m.new),
-            });
+    } else {
+        // Fallback: no primary match found. Scan the incident line for any
+        // applicable mappings (handles prop-value-change and CSS rules where
+        // the incident captures the prop/class name but mappings are value-level).
+        if let Some(file_line) = source.lines().nth((line as usize).saturating_sub(1)) {
+            for m in mappings {
+                if m.old == m.new {
+                    continue;
+                }
+                if file_line.contains(&m.old) {
+                    edits.push(TextEdit {
+                        line,
+                        old_text: m.old.clone(),
+                        new_text: m.new.clone(),
+                        rule_id: rule_id.to_string(),
+                        description: format!("Rename '{}' to '{}'", m.old, m.new),
+                    });
+                }
+            }
         }
     }
 

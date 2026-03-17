@@ -746,6 +746,7 @@ dependencies = [
  "frontend-css-scanner",
  "frontend-grpc",
  "frontend-js-scanner",
+ "libc",
  "regex",
  "reqwest 0.12.28",
  "serde",
