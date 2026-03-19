@@ -75,6 +75,7 @@ mkdir -p "$WORK_DIR"
 
 BINARY="$PROJECT_DIR/target/release/frontend-analyzer-provider"
 RULES_DIR="$PROJECT_DIR/rules/patternfly-v5-to-v6"
+RULES_STRATEGIES="$RULES_DIR/fix-strategies.json"
 PROVIDER_SETTINGS="$PROJECT_DIR/provider_settings.json"
 QUIPUCORDS="$WORK_DIR/quipucords-ui"
 OUTPUT_DIR="$WORK_DIR/analysis-output"
@@ -85,12 +86,13 @@ ANALYSIS_JSON="$WORK_DIR/analysis.json"
 info "Step 1: Preparing quipucords-ui at v5 commit ($V5_COMMIT)"
 
 if [ -d "$QUIPUCORDS/.git" ]; then
-  info "  Repository exists, resetting to $V5_COMMIT"
-  git -C "$QUIPUCORDS" checkout "$V5_COMMIT" -- . 2>/dev/null
+  info "  Repository exists, hard-resetting to $V5_COMMIT"
+  git -C "$QUIPUCORDS" checkout "$V5_COMMIT" --force 2>/dev/null
+  git -C "$QUIPUCORDS" clean -fd 2>/dev/null
 else
   info "  Cloning from $REPO_URL"
   git clone --quiet "$REPO_URL" "$QUIPUCORDS"
-  git -C "$QUIPUCORDS" checkout "$V5_COMMIT" -- . 2>/dev/null
+  git -C "$QUIPUCORDS" checkout "$V5_COMMIT" --force 2>/dev/null
 fi
 ok "quipucords-ui ready at $(git -C "$QUIPUCORDS" log --oneline -1 2>/dev/null)"
 
@@ -202,7 +204,8 @@ info "  Before fixes: $BEFORE_RULES"
 # ── Step 4: Apply pattern-based fixes ──────────────────────────────────────
 
 info "Step 4: Applying pattern-based fixes"
-"$BINARY" fix "$QUIPUCORDS" --input "$ANALYSIS_JSON" --apply
+"$BINARY" fix "$QUIPUCORDS" --input "$ANALYSIS_JSON" --apply \
+  --rules-strategies "$RULES_STRATEGIES"
 ok "Pattern-based fixes applied"
 
 # ── Step 5: Apply LLM fixes ────────────────────────────────────────────────
@@ -232,6 +235,7 @@ print(incidents)
   LLM_EXIT=0
   "$BINARY" fix "$QUIPUCORDS" \
     --input "$WORK_DIR/post-pattern-analysis.json" \
+    --rules-strategies "$RULES_STRATEGIES" \
     --llm-provider "$LLM_PROVIDER" \
     --apply \
     --verbose \

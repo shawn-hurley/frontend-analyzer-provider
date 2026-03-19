@@ -11,20 +11,35 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 /// Build a fix plan from analysis output.
-pub fn plan_fixes(output: &[RuleSet], project_root: &std::path::Path) -> Result<FixPlan> {
-    let strategies = build_strategy_table();
+///
+/// `strategies` is a merged map of rule ID → fix strategy, loaded from one or
+/// more external JSON files (rule-adjacent and/or semver-analyzer generated).
+/// When no strategy is found for a rule, label-based inference is attempted,
+/// falling back to LLM-assisted fixes.
+pub fn plan_fixes(
+    output: &[RuleSet],
+    project_root: &std::path::Path,
+    strategies: &BTreeMap<String, FixStrategy>,
+) -> Result<FixPlan> {
     let mut plan = FixPlan::default();
 
     for ruleset in output {
         for (rule_id, violation) in &ruleset.violations {
+            // Lookup order: strategies map → label inference → LLM fallback
             let strategy = strategies
                 .get(rule_id.as_str())
-                .or_else(|| infer_strategy_from_labels(&violation.labels))
                 .cloned()
+                .or_else(|| infer_strategy_from_labels(&violation.labels).cloned())
                 .unwrap_or(FixStrategy::Llm);
 
             for incident in &violation.incidents {
                 let file_path = uri_to_path(&incident.uri, project_root);
+
+                // Skip vendored files — these are updated via package.json
+                // version bumps, not by patching source directly.
+                if file_path.components().any(|c| c.as_os_str() == "vendor") {
+                    continue;
+                }
 
                 match &strategy {
                     FixStrategy::Rename(mappings) => {
@@ -40,6 +55,33 @@ pub fn plan_fixes(output: &[RuleSet], project_root: &std::path::Path) -> Result<
                     FixStrategy::ImportPathChange { old_path, new_path } => {
                         if let Some(fix) = plan_import_path_change(
                             rule_id, incident, old_path, new_path, &file_path,
+                        ) {
+                            plan.files.entry(file_path).or_default().push(fix);
+                        }
+                    }
+                    FixStrategy::CssVariablePrefix {
+                        old_prefix,
+                        new_prefix,
+                    } => {
+                        // Treat CSS prefix changes as renames
+                        let mappings = vec![RenameMapping {
+                            old: old_prefix.clone(),
+                            new: new_prefix.clone(),
+                        }];
+                        if let Some(fix) = plan_rename(rule_id, incident, &mappings, &file_path) {
+                            plan.files.entry(file_path).or_default().push(fix);
+                        }
+                    }
+                    FixStrategy::UpdateDependency {
+                        ref package,
+                        ref new_version,
+                    } => {
+                        if let Some(fix) = plan_update_dependency(
+                            rule_id,
+                            incident,
+                            package,
+                            new_version,
+                            &file_path,
                         ) {
                             plan.files.entry(file_path).or_default().push(fix);
                         }
@@ -385,38 +427,119 @@ fn plan_remove_prop(
 
     // Read the actual file line to construct a precise removal edit.
     let source = std::fs::read_to_string(file_path).ok()?;
-    let file_line = source.lines().nth((line as usize).saturating_sub(1))?;
+    let all_lines: Vec<&str> = source.lines().collect();
+    let line_idx = (line as usize).saturating_sub(1);
+    let file_line = all_lines.get(line_idx)?;
     let trimmed = file_line.trim();
 
-    // If the entire line is just the prop (common in formatted JSX), remove the whole line
+    // If the entire line is just the prop (common in formatted JSX), remove it.
     // Patterns: `propName`, `propName={...}`, `propName="..."`, `propName={true}`
     if trimmed.starts_with(prop_name) {
-        // The whole line is the prop — replace line content with empty
-        Some(PlannedFix {
-            edits: vec![TextEdit {
-                line,
-                old_text: file_line.to_string(),
-                new_text: String::new(),
+        // Check if the prop value is self-contained on this line by counting
+        // bracket/brace depth. If the value spans multiple lines (e.g.,
+        // `actions={[ <Button>...</Button> ]}`), we need to remove all of them.
+        let depth = bracket_depth(file_line);
+        if depth == 0 {
+            // Single-line prop — safe to remove just this line
+            Some(PlannedFix {
+                edits: vec![TextEdit {
+                    line,
+                    old_text: file_line.to_string(),
+                    new_text: String::new(),
+                    rule_id: rule_id.to_string(),
+                    description: format!("Remove prop '{}' (entire line)", prop_name),
+                }],
+                confidence: FixConfidence::High,
+                source: FixSource::Pattern,
                 rule_id: rule_id.to_string(),
-                description: format!("Remove prop '{}' (entire line)", prop_name),
-            }],
-            confidence: FixConfidence::High,
-            source: FixSource::Pattern,
-            rule_id: rule_id.to_string(),
-            file_uri: incident.uri.clone(),
-            line,
-            description: format!("Remove prop '{}'", prop_name),
-        })
+                file_uri: incident.uri.clone(),
+                line,
+                description: format!("Remove prop '{}'", prop_name),
+            })
+        } else {
+            // Multi-line prop value — scan forward to find where brackets balance.
+            let mut cumulative_depth = depth;
+            let mut end_idx = line_idx;
+            for (i, subsequent_line) in all_lines.iter().enumerate().skip(line_idx + 1) {
+                cumulative_depth += bracket_depth(subsequent_line);
+                end_idx = i;
+                if cumulative_depth <= 0 {
+                    break;
+                }
+            }
+
+            if cumulative_depth > 0 {
+                // Could not find matching close bracket — bail to manual review
+                return Some(PlannedFix {
+                    edits: vec![],
+                    confidence: FixConfidence::Low,
+                    source: FixSource::Pattern,
+                    rule_id: rule_id.to_string(),
+                    file_uri: incident.uri.clone(),
+                    line,
+                    description: format!(
+                        "Remove prop '{}' (unbalanced brackets, manual)",
+                        prop_name
+                    ),
+                });
+            }
+
+            // Remove all lines from prop start through closing bracket
+            let mut edits = Vec::new();
+            for i in line_idx..=end_idx {
+                if let Some(l) = all_lines.get(i) {
+                    edits.push(TextEdit {
+                        line: (i + 1) as u32,
+                        old_text: l.to_string(),
+                        new_text: String::new(),
+                        rule_id: rule_id.to_string(),
+                        description: format!(
+                            "Remove prop '{}' (line {} of multi-line)",
+                            prop_name,
+                            i - line_idx + 1
+                        ),
+                    });
+                }
+            }
+
+            Some(PlannedFix {
+                edits,
+                confidence: FixConfidence::High,
+                source: FixSource::Pattern,
+                rule_id: rule_id.to_string(),
+                file_uri: incident.uri.clone(),
+                line,
+                description: format!(
+                    "Remove prop '{}' ({} lines)",
+                    prop_name,
+                    end_idx - line_idx + 1
+                ),
+            })
+        }
     } else {
         // Prop is inline with other content — try to remove just the prop fragment.
         // Match: ` propName={...}` or ` propName="..."` or ` propName`
-        // Use a simple regex to find the prop and its value.
+        // Use a simple regex to find the prop and its value on a single line.
         let prop_re = regex::Regex::new(&format!(
             r#"\s+{prop_name}(?:=\{{[^}}]*\}}|="[^"]*"|='[^']*'|=\{{.*?\}})?"#
         ))
         .ok()?;
 
         if let Some(m) = prop_re.find(file_line) {
+            // Verify the matched fragment has balanced brackets. If not, the value
+            // spans multiple lines and a simple single-line removal would corrupt the file.
+            if bracket_depth(m.as_str()) != 0 {
+                return Some(PlannedFix {
+                    edits: vec![],
+                    confidence: FixConfidence::Low,
+                    source: FixSource::Pattern,
+                    rule_id: rule_id.to_string(),
+                    file_uri: incident.uri.clone(),
+                    line,
+                    description: format!("Remove prop '{}' (multi-line inline, manual)", prop_name),
+                });
+            }
+
             Some(PlannedFix {
                 edits: vec![TextEdit {
                     line,
@@ -473,6 +596,54 @@ fn plan_import_path_change(
     })
 }
 
+fn plan_update_dependency(
+    rule_id: &str,
+    incident: &ViolationIncident,
+    package: &str,
+    new_version: &str,
+    file_path: &PathBuf,
+) -> Option<PlannedFix> {
+    let line = incident.line_number?;
+    let source = std::fs::read_to_string(file_path).ok()?;
+    let file_line = source.lines().nth((line as usize).saturating_sub(1))?;
+
+    // Verify this line references the expected package
+    if !file_line.contains(package) {
+        return None;
+    }
+
+    // Match the version string after the package name.
+    // Handles common patterns: "^5.4.0", "~5.3.1", "5.4.0", ">=5.0.0", etc.
+    let version_re = regex::Regex::new(r#"("[\^~><=]*\d+\.\d+\.\d+[^"]*")"#).ok()?;
+
+    if let Some(m) = version_re.find(file_line) {
+        let old_version = m.as_str();
+        // Build new version string preserving the quote style
+        let new_ver_quoted = format!("\"{}\"", new_version);
+
+        Some(PlannedFix {
+            edits: vec![TextEdit {
+                line,
+                old_text: old_version.to_string(),
+                new_text: new_ver_quoted.clone(),
+                rule_id: rule_id.to_string(),
+                description: format!(
+                    "Update {} from {} to {}",
+                    package, old_version, new_ver_quoted
+                ),
+            }],
+            confidence: FixConfidence::Exact,
+            source: FixSource::Pattern,
+            rule_id: rule_id.to_string(),
+            file_uri: incident.uri.clone(),
+            line,
+            description: format!("Update {} to {}", package, new_version),
+        })
+    } else {
+        None
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Deduplicate import specifiers on lines that look like ES import statements.
@@ -514,6 +685,35 @@ fn dedup_import_specifiers(lines: &mut [String]) {
     }
 }
 
+/// Count net bracket/brace depth change for a line.
+/// Returns positive if more openers than closers, negative if more closers.
+/// Ignores brackets inside string literals (single/double quoted).
+fn bracket_depth(line: &str) -> i32 {
+    let mut depth: i32 = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+    let mut prev = '\0';
+    for ch in line.chars() {
+        match ch {
+            '\'' if !in_double_quote && !in_backtick && prev != '\\' => {
+                in_single_quote = !in_single_quote
+            }
+            '"' if !in_single_quote && !in_backtick && prev != '\\' => {
+                in_double_quote = !in_double_quote
+            }
+            '`' if !in_single_quote && !in_double_quote && prev != '\\' => {
+                in_backtick = !in_backtick
+            }
+            '{' | '[' | '(' if !in_single_quote && !in_double_quote && !in_backtick => depth += 1,
+            '}' | ']' | ')' if !in_single_quote && !in_double_quote && !in_backtick => depth -= 1,
+            _ => {}
+        }
+        prev = ch;
+    }
+    depth
+}
+
 /// Extract the matched text from incident variables.
 /// Checks propName, componentName, importedName, className, variableName in that order.
 fn get_matched_text(incident: &ViolationIncident) -> String {
@@ -544,510 +744,19 @@ fn uri_to_path(uri: &str, project_root: &std::path::Path) -> PathBuf {
 }
 
 /// Try to infer a fix strategy from rule labels when no explicit mapping exists.
+/// This is a fallback for rules not covered by any strategy file.
 fn infer_strategy_from_labels(labels: &[String]) -> Option<&'static FixStrategy> {
     for label in labels {
         match label.as_str() {
             "change-type=prop-removal" => return Some(&FixStrategy::RemoveProp),
             "change-type=dom-structure"
             | "change-type=behavioral"
-            | "change-type=accessibility" => return Some(&FixStrategy::Manual),
+            | "change-type=accessibility"
+            | "change-type=interface-removal"
+            | "change-type=module-export"
+            | "change-type=other" => return Some(&FixStrategy::Manual),
             _ => {}
         }
     }
     None
-}
-
-// ── Strategy table ────────────────────────────────────────────────────────
-
-/// Build the known fix strategy table.
-/// Each entry maps a rule ID to the fix transform that should be applied.
-fn build_strategy_table() -> BTreeMap<&'static str, FixStrategy> {
-    let mut m = BTreeMap::new();
-
-    // ── Component renames ──
-    m.insert(
-        "pfv6-rename-chip-to-label",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "Chip".into(),
-                new: "Label".into(),
-            },
-            RenameMapping {
-                old: "ChipGroup".into(),
-                new: "LabelGroup".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-rename-toolbar-chip-group-content",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "ToolbarChipGroupContent".into(),
-            new: "ToolbarLabelGroupContent".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-masthead-brand",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "MastheadBrand".into(),
-            new: "MastheadLogo".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-content-header",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "ContentHeader".into(),
-            new: "PageHeader".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-invalid-object",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "InvalidObject".into(),
-            new: "MissingPage".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-not-authorized",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "NotAuthorized".into(),
-            new: "UnauthorizedAccess".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-text-to-content",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "TextContent".into(),
-                new: "Content".into(),
-            },
-            RenameMapping {
-                old: "TextList".into(),
-                new: "Content".into(),
-            },
-            RenameMapping {
-                old: "TextListItem".into(),
-                new: "Content".into(),
-            },
-            RenameMapping {
-                old: "Text".into(),
-                new: "Content".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-rename-text-variants",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "TextVariants".into(),
-                new: "ContentVariants".into(),
-            },
-            RenameMapping {
-                old: "TextProps".into(),
-                new: "ContentProps".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-rename-text-isvisited",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isVisited".into(),
-            new: "isVisitedLink".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-textlist-isplain",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isPlain".into(),
-            new: "isPlainList".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-rename-form-field-group-typo",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "FormFiledGroupHeaderTitleTextObject".into(),
-            new: "FormFieldGroupHeaderTitleTextObject".into(),
-        }]),
-    );
-
-    // ── Prop renames ──
-    m.insert(
-        "pfv6-prop-rename-button-isactive",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isActive".into(),
-            new: "isClicked".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-page-header",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "header".into(),
-            new: "masthead".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-page-tertiary-nav",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "tertiaryNav".into(),
-            new: "horizontalSubnav".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-page-is-tertiary-grouped",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isTertiaryNavGrouped".into(),
-            new: "isHorizontalSubnavGrouped".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-page-is-tertiary-width-limited",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isTertiaryNavWidthLimited".into(),
-            new: "isHorizontalSubnavWidthLimited".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-avatar-border",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "border".into(),
-            new: "isBordered".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-formgroup-labelicon",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "labelIcon".into(),
-            new: "labelHelp".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-tabs-issecondary",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isSecondary".into(),
-            new: "isSubtab".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-checkbox-label-position",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isLabelBeforeButton".into(),
-            new: "labelPosition".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-innerref-to-ref",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "innerRef".into(),
-            new: "ref".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-toolbar-chip-to-label",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "chips".into(),
-                new: "labels".into(),
-            },
-            RenameMapping {
-                old: "deleteChip".into(),
-                new: "deleteLabel".into(),
-            },
-            RenameMapping {
-                old: "deleteChipGroup".into(),
-                new: "deleteLabelGroup".into(),
-            },
-            RenameMapping {
-                old: "chipGroupExpandedText".into(),
-                new: "labelGroupExpandedText".into(),
-            },
-            RenameMapping {
-                old: "chipGroupCollapsedText".into(),
-                new: "labelGroupCollapsedText".into(),
-            },
-            RenameMapping {
-                old: "categoryName".into(),
-                new: "categoryName".into(),
-            }, // no rename needed
-            RenameMapping {
-                old: "customChipGroupContent".into(),
-                new: "customLabelGroupContent".into(),
-            },
-            RenameMapping {
-                old: "chipContainerRef".into(),
-                new: "labelContainerRef".into(),
-            },
-            RenameMapping {
-                old: "expandableChipContainerRef".into(),
-                new: "expandableLabelContainerRef".into(),
-            },
-            RenameMapping {
-                old: "chipGroupContentRef".into(),
-                new: "labelGroupContentRef".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-prop-rename-menutoggle-splitbutton",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "splitButtonOptions".into(),
-            new: "splitButtonItems".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-rename-toolbar-chip-interfaces",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "ToolbarChipGroup".into(),
-                new: "ToolbarLabelGroup".into(),
-            },
-            RenameMapping {
-                old: "ToolbarChip".into(),
-                new: "ToolbarLabel".into(),
-            },
-        ]),
-    );
-
-    // ── Prop value changes ──
-    m.insert(
-        "pfv6-prop-value-toolbar-group-variant",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "icon-button-group".into(),
-                new: "action-group-plain".into(),
-            },
-            RenameMapping {
-                old: "button-group".into(),
-                new: "action-group".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-prop-value-toolbar-item-variant",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "chip-group".into(),
-            new: "label-group".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-value-tabs-variant",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "light300".into(),
-            new: "secondary".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-value-nav-tertiary",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "tertiary".into(),
-            new: "horizontal-subnav".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-value-drawer-colorvariant",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "light-200".into(),
-            new: "secondary".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-value-label-overflow",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "isOverflowLabel".into(),
-            new: "variant".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-prop-value-toolbar-spacer",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "spacer".into(),
-                new: "gap".into(),
-            },
-            RenameMapping {
-                old: "spaceItems".into(),
-                new: "gap".into(),
-            },
-            RenameMapping {
-                old: "spacerNone".into(),
-                new: "gapNone".into(),
-            },
-            RenameMapping {
-                old: "spacerSm".into(),
-                new: "gapSm".into(),
-            },
-            RenameMapping {
-                old: "spacerMd".into(),
-                new: "gapMd".into(),
-            },
-            RenameMapping {
-                old: "spacerLg".into(),
-                new: "gapLg".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-prop-rename-toolbar-align",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "alignLeft".into(),
-                new: "alignStart".into(),
-            },
-            RenameMapping {
-                old: "alignRight".into(),
-                new: "alignEnd".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-prop-value-banner-color",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "cyan".into(),
-                new: "teal".into(),
-            },
-            RenameMapping {
-                old: "gold".into(),
-                new: "yellow".into(),
-            },
-        ]),
-    );
-    m.insert(
-        "pfv6-prop-value-banner-variant",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "variant".into(),
-            new: "color".into(),
-        }]),
-    );
-
-    // ── Prop removals ──
-    m.insert(
-        "pfv6-prop-remove-accordion-ishidden",
-        FixStrategy::RemoveProp,
-    );
-    m.insert("pfv6-prop-remove-card-various", FixStrategy::RemoveProp);
-    m.insert(
-        "pfv6-prop-remove-datalist-plain-button",
-        FixStrategy::RemoveProp,
-    );
-    m.insert("pfv6-prop-remove-drawer-nopadding", FixStrategy::RemoveProp);
-    m.insert(
-        "pfv6-prop-remove-expandable-isactive",
-        FixStrategy::RemoveProp,
-    );
-    m.insert("pfv6-prop-remove-helpertext-props", FixStrategy::RemoveProp);
-    m.insert("pfv6-prop-remove-masthead-bgcolor", FixStrategy::RemoveProp);
-    m.insert("pfv6-prop-remove-nav-theme", FixStrategy::RemoveProp);
-    m.insert("pfv6-prop-remove-navitem-wrapper", FixStrategy::RemoveProp);
-    m.insert("pfv6-prop-remove-switch-labeloff", FixStrategy::RemoveProp);
-    m.insert("pfv6-prop-remove-toolbar-various", FixStrategy::RemoveProp);
-    m.insert(
-        "pfv6-prop-remove-navlist-aria-scroll",
-        FixStrategy::RemoveProp,
-    );
-    m.insert(
-        "pfv6-prop-remove-duallist-onoptionselect",
-        FixStrategy::RemoveProp,
-    );
-    m.insert(
-        "pfv6-prop-remove-accordion-toggle-isexpanded",
-        FixStrategy::RemoveProp,
-    );
-
-    // ── CSS class/variable renames ──
-    m.insert(
-        "pfv6-css-v5-prefix",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "pf-v5-".into(),
-            new: "pf-v6-".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-css-variable-v5-prefix",
-        FixStrategy::Rename(vec![RenameMapping {
-            old: "--pf-v5-".into(),
-            new: "--pf-v6-".into(),
-        }]),
-    );
-    m.insert(
-        "pfv6-css-variable-logical-properties",
-        FixStrategy::Rename(vec![
-            RenameMapping {
-                old: "PaddingTop".into(),
-                new: "PaddingBlockStart".into(),
-            },
-            RenameMapping {
-                old: "PaddingBottom".into(),
-                new: "PaddingBlockEnd".into(),
-            },
-            RenameMapping {
-                old: "PaddingLeft".into(),
-                new: "PaddingInlineStart".into(),
-            },
-            RenameMapping {
-                old: "PaddingRight".into(),
-                new: "PaddingInlineEnd".into(),
-            },
-            RenameMapping {
-                old: "MarginTop".into(),
-                new: "MarginBlockStart".into(),
-            },
-            RenameMapping {
-                old: "MarginBottom".into(),
-                new: "MarginBlockEnd".into(),
-            },
-            RenameMapping {
-                old: "MarginLeft".into(),
-                new: "MarginInlineStart".into(),
-            },
-            RenameMapping {
-                old: "MarginRight".into(),
-                new: "MarginInlineEnd".into(),
-            },
-            RenameMapping {
-                old: "InsetTop".into(),
-                new: "InsetBlockStart".into(),
-            },
-            RenameMapping {
-                old: "InsetBottom".into(),
-                new: "InsetBlockEnd".into(),
-            },
-            RenameMapping {
-                old: "InsetLeft".into(),
-                new: "InsetInlineStart".into(),
-            },
-            RenameMapping {
-                old: "InsetRight".into(),
-                new: "InsetInlineEnd".into(),
-            },
-            RenameMapping {
-                old: "--Left".into(),
-                new: "--InsetInlineStart".into(),
-            },
-            RenameMapping {
-                old: "--Right".into(),
-                new: "--InsetInlineEnd".into(),
-            },
-        ]),
-    );
-
-    // ── Complex structural changes → LLM ──
-    m.insert("pfv6-dom-masthead-layout", FixStrategy::Llm);
-    m.insert("pfv6-deprecated-modal", FixStrategy::Llm);
-    m.insert("pfv6-chip-deprecated-import", FixStrategy::Llm);
-    m.insert("pfv6-remove-empty-state-header", FixStrategy::Llm);
-    m.insert("pfv6-deprecated-select-old", FixStrategy::Llm);
-    m.insert("pfv6-deprecated-dropdown-old", FixStrategy::Llm);
-    m.insert("pfv6-deprecated-wizard-old", FixStrategy::Llm);
-    m.insert("pfv6-behavioral-button-icon-children", FixStrategy::Llm);
-
-    // ── Manual review required ──
-    m.insert("pfv6-dom-expandable-section-toggle", FixStrategy::Manual);
-    m.insert("pfv6-dom-navlist-scroll-buttons", FixStrategy::Manual);
-    m.insert("pfv6-dom-progress-tooltip", FixStrategy::Manual);
-    m.insert("pfv6-dom-truncate-tooltip", FixStrategy::Manual);
-    m.insert("pfv6-dom-dropdown-item-tooltip", FixStrategy::Manual);
-    m.insert("pfv6-dom-menu-item-tooltip", FixStrategy::Manual);
-    m.insert("pfv6-dom-pagination-toggle", FixStrategy::Manual);
-    m.insert("pfv6-dom-tabs-scroll-buttons", FixStrategy::Manual);
-
-    m
 }

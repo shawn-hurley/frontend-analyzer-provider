@@ -563,9 +563,13 @@ fn check_jsx_element(
                                 JSXAttributeValue::ExpressionContainer(expr) => {
                                     // For expressions, capture the source text
                                     let expr_span = expr.span();
-                                    // Strip the { } wrapper
-                                    let text = &source[(expr_span.start as usize + 1)
-                                        ..(expr_span.end as usize).saturating_sub(1)];
+                                    // Strip the { } wrapper, with bounds checking
+                                    let start = (expr_span.start as usize + 1).min(source.len());
+                                    let end = (expr_span.end as usize)
+                                        .saturating_sub(1)
+                                        .max(start)
+                                        .min(source.len());
+                                    let text = &source[start..end];
                                     Some(text.trim().to_string())
                                 }
                                 _ => None,

@@ -14,7 +14,7 @@ pub struct ServeOpts {
 }
 
 pub async fn run(opts: ServeOpts) -> Result<()> {
-    let provider = Arc::new(frontend_grpc::service::FrontendProvider::new());
+    let provider = Arc::new(frontend_grpc::service::FrontendProvider::new(1));
 
     if let Some(port) = opts.port {
         frontend_grpc::server::serve_tcp(provider, port).await?;

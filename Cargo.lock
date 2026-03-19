@@ -807,6 +807,7 @@ dependencies = [
  "tonic-build",
  "tonic-reflection",
  "tracing",
+ "url",
 ]
 
 [[package]]

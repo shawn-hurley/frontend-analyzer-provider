@@ -1,0 +1,328 @@
+{
+  "pfv6-rename-chip-to-label": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "Chip", "to": "Label" },
+      { "from": "ChipGroup", "to": "LabelGroup" }
+    ]
+  },
+  "pfv6-rename-toolbar-chip-group-content": {
+    "strategy": "Rename",
+    "from": "ToolbarChipGroupContent",
+    "to": "ToolbarLabelGroupContent"
+  },
+  "pfv6-rename-masthead-brand": {
+    "strategy": "Rename",
+    "from": "MastheadBrand",
+    "to": "MastheadLogo"
+  },
+  "pfv6-rename-content-header": {
+    "strategy": "Rename",
+    "from": "ContentHeader",
+    "to": "PageHeader"
+  },
+  "pfv6-rename-invalid-object": {
+    "strategy": "Rename",
+    "from": "InvalidObject",
+    "to": "MissingPage"
+  },
+  "pfv6-rename-not-authorized": {
+    "strategy": "Rename",
+    "from": "NotAuthorized",
+    "to": "UnauthorizedAccess"
+  },
+  "pfv6-rename-text-to-content": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "TextContent", "to": "Content" },
+      { "from": "TextList", "to": "Content" },
+      { "from": "TextListItem", "to": "Content" },
+      { "from": "Text", "to": "Content" }
+    ]
+  },
+  "pfv6-rename-text-variants": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "TextVariants", "to": "ContentVariants" },
+      { "from": "TextProps", "to": "ContentProps" }
+    ]
+  },
+  "pfv6-rename-text-isvisited": {
+    "strategy": "Rename",
+    "from": "isVisited",
+    "to": "isVisitedLink"
+  },
+  "pfv6-rename-textlist-isplain": {
+    "strategy": "Rename",
+    "from": "isPlain",
+    "to": "isPlainList"
+  },
+  "pfv6-rename-form-field-group-typo": {
+    "strategy": "Rename",
+    "from": "FormFiledGroupHeaderTitleTextObject",
+    "to": "FormFieldGroupHeaderTitleTextObject"
+  },
+
+  "pfv6-prop-rename-button-isactive": {
+    "strategy": "Rename",
+    "from": "isActive",
+    "to": "isClicked"
+  },
+  "pfv6-prop-rename-page-header": {
+    "strategy": "Rename",
+    "from": "header",
+    "to": "masthead"
+  },
+  "pfv6-prop-rename-page-tertiary-nav": {
+    "strategy": "Rename",
+    "from": "tertiaryNav",
+    "to": "horizontalSubnav"
+  },
+  "pfv6-prop-rename-page-is-tertiary-grouped": {
+    "strategy": "Rename",
+    "from": "isTertiaryNavGrouped",
+    "to": "isHorizontalSubnavGrouped"
+  },
+  "pfv6-prop-rename-page-is-tertiary-width-limited": {
+    "strategy": "Rename",
+    "from": "isTertiaryNavWidthLimited",
+    "to": "isHorizontalSubnavWidthLimited"
+  },
+  "pfv6-prop-rename-avatar-border": {
+    "strategy": "Rename",
+    "from": "border",
+    "to": "isBordered"
+  },
+  "pfv6-prop-rename-formgroup-labelicon": {
+    "strategy": "Rename",
+    "from": "labelIcon",
+    "to": "labelHelp"
+  },
+  "pfv6-prop-rename-tabs-issecondary": {
+    "strategy": "Rename",
+    "from": "isSecondary",
+    "to": "isSubtab"
+  },
+  "pfv6-prop-rename-checkbox-label-position": {
+    "strategy": "Rename",
+    "from": "isLabelBeforeButton",
+    "to": "labelPosition"
+  },
+  "pfv6-prop-rename-innerref-to-ref": {
+    "strategy": "Rename",
+    "from": "innerRef",
+    "to": "ref"
+  },
+  "pfv6-prop-rename-toolbar-chip-to-label": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "chips", "to": "labels" },
+      { "from": "deleteChip", "to": "deleteLabel" },
+      { "from": "deleteChipGroup", "to": "deleteLabelGroup" },
+      { "from": "chipGroupExpandedText", "to": "labelGroupExpandedText" },
+      { "from": "chipGroupCollapsedText", "to": "labelGroupCollapsedText" },
+      { "from": "customChipGroupContent", "to": "customLabelGroupContent" },
+      { "from": "chipContainerRef", "to": "labelContainerRef" },
+      { "from": "expandableChipContainerRef", "to": "expandableLabelContainerRef" },
+      { "from": "chipGroupContentRef", "to": "labelGroupContentRef" }
+    ]
+  },
+  "pfv6-prop-rename-menutoggle-splitbutton": {
+    "strategy": "Rename",
+    "from": "splitButtonOptions",
+    "to": "splitButtonItems"
+  },
+  "pfv6-prop-rename-toolbar-chip-interfaces": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "ToolbarChipGroup", "to": "ToolbarLabelGroup" },
+      { "from": "ToolbarChip", "to": "ToolbarLabel" }
+    ]
+  },
+
+  "pfv6-prop-value-toolbar-group-variant": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "icon-button-group", "to": "action-group-plain" },
+      { "from": "button-group", "to": "action-group" }
+    ]
+  },
+  "pfv6-prop-value-toolbar-item-variant": {
+    "strategy": "Rename",
+    "from": "chip-group",
+    "to": "label-group"
+  },
+  "pfv6-prop-value-tabs-variant": {
+    "strategy": "Rename",
+    "from": "light300",
+    "to": "secondary"
+  },
+  "pfv6-prop-value-nav-tertiary": {
+    "strategy": "Rename",
+    "from": "tertiary",
+    "to": "horizontal-subnav"
+  },
+  "pfv6-prop-value-drawer-colorvariant": {
+    "strategy": "Rename",
+    "from": "light-200",
+    "to": "secondary"
+  },
+  "pfv6-prop-value-label-overflow": {
+    "strategy": "Rename",
+    "from": "isOverflowLabel",
+    "to": "variant"
+  },
+  "pfv6-prop-value-toolbar-spacer": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "spacer", "to": "gap" },
+      { "from": "spaceItems", "to": "gap" },
+      { "from": "spacerNone", "to": "gapNone" },
+      { "from": "spacerSm", "to": "gapSm" },
+      { "from": "spacerMd", "to": "gapMd" },
+      { "from": "spacerLg", "to": "gapLg" }
+    ]
+  },
+  "pfv6-prop-rename-toolbar-align": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "alignLeft", "to": "alignStart" },
+      { "from": "alignRight", "to": "alignEnd" }
+    ]
+  },
+  "pfv6-prop-value-banner-color": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "cyan", "to": "teal" },
+      { "from": "gold", "to": "yellow" }
+    ]
+  },
+  "pfv6-prop-value-banner-variant": {
+    "strategy": "Rename",
+    "from": "variant",
+    "to": "color"
+  },
+
+  "pfv6-prop-remove-accordion-ishidden": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-card-various": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-datalist-plain-button": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-drawer-nopadding": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-expandable-isactive": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-helpertext-props": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-masthead-bgcolor": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-nav-theme": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-navitem-wrapper": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-switch-labeloff": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-toolbar-various": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-navlist-aria-scroll": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-duallist-onoptionselect": {
+    "strategy": "RemoveProp"
+  },
+  "pfv6-prop-remove-accordion-toggle-isexpanded": {
+    "strategy": "RemoveProp"
+  },
+
+  "pfv6-css-v5-prefix": {
+    "strategy": "CssVariablePrefix",
+    "from": "pf-v5-",
+    "to": "pf-v6-"
+  },
+  "pfv6-css-variable-v5-prefix": {
+    "strategy": "CssVariablePrefix",
+    "from": "--pf-v5-",
+    "to": "--pf-v6-"
+  },
+  "pfv6-css-variable-logical-properties": {
+    "strategy": "Rename",
+    "mappings": [
+      { "from": "PaddingTop", "to": "PaddingBlockStart" },
+      { "from": "PaddingBottom", "to": "PaddingBlockEnd" },
+      { "from": "PaddingLeft", "to": "PaddingInlineStart" },
+      { "from": "PaddingRight", "to": "PaddingInlineEnd" },
+      { "from": "MarginTop", "to": "MarginBlockStart" },
+      { "from": "MarginBottom", "to": "MarginBlockEnd" },
+      { "from": "MarginLeft", "to": "MarginInlineStart" },
+      { "from": "MarginRight", "to": "MarginInlineEnd" },
+      { "from": "InsetTop", "to": "InsetBlockStart" },
+      { "from": "InsetBottom", "to": "InsetBlockEnd" },
+      { "from": "InsetLeft", "to": "InsetInlineStart" },
+      { "from": "InsetRight", "to": "InsetInlineEnd" },
+      { "from": "--Left", "to": "--InsetInlineStart" },
+      { "from": "--Right", "to": "--InsetInlineEnd" }
+    ]
+  },
+
+  "pfv6-dom-masthead-layout": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-deprecated-modal": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-chip-deprecated-import": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-remove-empty-state-header": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-deprecated-select-old": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-deprecated-dropdown-old": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-deprecated-wizard-old": {
+    "strategy": "LlmAssisted"
+  },
+  "pfv6-behavioral-button-icon-children": {
+    "strategy": "LlmAssisted"
+  },
+
+  "pfv6-dom-expandable-section-toggle": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-navlist-scroll-buttons": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-progress-tooltip": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-truncate-tooltip": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-dropdown-item-tooltip": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-menu-item-tooltip": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-pagination-toggle": {
+    "strategy": "Manual"
+  },
+  "pfv6-dom-tabs-scroll-buttons": {
+    "strategy": "Manual"
+  }
+}

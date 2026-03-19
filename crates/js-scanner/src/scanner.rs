@@ -210,6 +210,7 @@ pub fn scan_file_classnames(file_path: &Path, root: &Path, pattern: &Regex) -> R
     let ret = Parser::new(&allocator, &source, source_type).parse();
 
     if ret.panicked {
+        tracing::warn!("Parser panicked on {}", file_path.display());
         return Ok(Vec::new());
     }
 
@@ -238,6 +239,7 @@ pub fn scan_file_css_vars(file_path: &Path, root: &Path, pattern: &Regex) -> Res
     let ret = Parser::new(&allocator, &source, source_type).parse();
 
     if ret.panicked {
+        tracing::warn!("Parser panicked on {}", file_path.display());
         return Ok(Vec::new());
     }
 
@@ -304,24 +306,24 @@ pub fn path_to_uri(path: &Path, root: &Path) -> String {
 
 /// Compute 1-indexed line number from a byte offset in source text.
 pub fn line_number_from_offset(source: &str, offset: u32) -> u32 {
-    source[..offset as usize]
-        .chars()
-        .filter(|c| *c == '\n')
-        .count() as u32
-        + 1
+    let clamped = (offset as usize).min(source.len());
+    source[..clamped].chars().filter(|c| *c == '\n').count() as u32 + 1
 }
 
 /// Create an Incident from source location info.
 pub fn make_incident(source: &str, file_uri: &str, start_offset: u32, end_offset: u32) -> Incident {
+    let start_clamped = (start_offset as usize).min(source.len());
+    let end_clamped = (end_offset as usize).min(source.len());
+
     let line = line_number_from_offset(source, start_offset);
-    let start_col = source[..start_offset as usize]
+    let start_col = source[..start_clamped]
         .rfind('\n')
-        .map(|p| start_offset as usize - p - 1)
-        .unwrap_or(start_offset as usize) as u32;
-    let end_col = source[..end_offset as usize]
+        .map(|p| start_clamped - p - 1)
+        .unwrap_or(start_clamped) as u32;
+    let end_col = source[..end_clamped]
         .rfind('\n')
-        .map(|p| end_offset as usize - p - 1)
-        .unwrap_or(end_offset as usize) as u32;
+        .map(|p| end_clamped - p - 1)
+        .unwrap_or(end_clamped) as u32;
     let end_line = line_number_from_offset(source, end_offset);
 
     Incident::new(

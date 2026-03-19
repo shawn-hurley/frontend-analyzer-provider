@@ -12,13 +12,16 @@ use std::pin::Pin;
 pub struct FrontendProvider {
     pub config: Arc<Mutex<Option<Config>>>,
     pub project_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Number of context lines to include around code snippets.
+    pub context_lines: usize,
 }
 
 impl FrontendProvider {
-    pub fn new() -> Self {
+    pub fn new(context_lines: usize) -> Self {
         Self {
             config: Arc::new(Mutex::new(None)),
             project_root: Arc::new(Mutex::new(None)),
+            context_lines,
         }
     }
 }
@@ -72,8 +75,8 @@ impl ProviderService for FrontendProvider {
             }));
         }
 
-        *self.config.lock().unwrap() = Some(config);
-        *self.project_root.lock().unwrap() = Some(root);
+        *self.config.lock().map_err(|_| Status::internal("Config lock poisoned"))? = Some(config);
+        *self.project_root.lock().map_err(|_| Status::internal("Project root lock poisoned"))? = Some(root);
 
         Ok(Response::new(InitResponse {
             error: String::new(),
@@ -91,7 +94,7 @@ impl ProviderService for FrontendProvider {
         let root = self
             .project_root
             .lock()
-            .unwrap()
+            .map_err(|_| Status::internal("Project root lock poisoned"))?
             .clone()
             .ok_or_else(|| Status::failed_precondition("Provider not initialized"))?;
 

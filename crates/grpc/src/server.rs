@@ -1,5 +1,6 @@
 //! gRPC server transport setup.
 
+use crate::proto::provider_code_location_service_server::ProviderCodeLocationServiceServer;
 use crate::proto::provider_service_server::ProviderServiceServer;
 use crate::service::FrontendProvider;
 use std::sync::Arc;
@@ -15,7 +16,8 @@ pub async fn serve_tcp(provider: Arc<FrontendProvider>, port: u16) -> anyhow::Re
         .build_v1alpha()?;
 
     Server::builder()
-        .add_service(ProviderServiceServer::from_arc(provider))
+        .add_service(ProviderServiceServer::from_arc(provider.clone()))
+        .add_service(ProviderCodeLocationServiceServer::from_arc(provider))
         .add_service(reflection)
         .serve(addr)
         .await?;
@@ -41,7 +43,8 @@ pub async fn serve_unix(provider: Arc<FrontendProvider>, socket_path: &str) -> a
         .build_v1alpha()?;
 
     Server::builder()
-        .add_service(ProviderServiceServer::from_arc(provider))
+        .add_service(ProviderServiceServer::from_arc(provider.clone()))
+        .add_service(ProviderCodeLocationServiceServer::from_arc(provider))
         .add_service(reflection)
         .serve_with_incoming(uds_stream)
         .await?;

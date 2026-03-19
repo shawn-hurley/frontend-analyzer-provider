@@ -51,7 +51,9 @@ pub fn scan_type_refs(
             }
             for heritage in &iface.extends {
                 let ext_span = heritage.expression.span();
-                let ext_name = &source[ext_span.start as usize..ext_span.end as usize];
+                let ext_name = source
+                    .get(ext_span.start as usize..ext_span.end as usize)
+                    .unwrap_or_default();
                 if pattern.is_match(ext_name) {
                     let span = heritage.span();
                     let mut incident = make_incident(source, file_uri, span.start, span.end);
@@ -145,7 +147,9 @@ fn check_ts_type(
     match ts_type {
         TSType::TSTypeReference(type_ref) => {
             let name_span = type_ref.type_name.span();
-            let name = &source[name_span.start as usize..name_span.end as usize];
+            let name = source
+                .get(name_span.start as usize..name_span.end as usize)
+                .unwrap_or_default();
             if pattern.is_match(name) {
                 let mut incident = make_incident(source, file_uri, name_span.start, name_span.end);
                 incident.variables.insert(

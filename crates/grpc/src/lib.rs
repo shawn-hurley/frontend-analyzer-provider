@@ -1,6 +1,7 @@
 pub mod service;
 pub mod evaluate;
 pub mod server;
+pub mod code_snip;
 
 /// Generated protobuf code.
 pub mod proto {

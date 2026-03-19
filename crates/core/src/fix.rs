@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single text replacement within a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,8 +133,153 @@ pub enum FixStrategy {
     RemoveProp,
     /// Replace an import source path.
     ImportPathChange { old_path: String, new_path: String },
+    /// Replace a CSS variable/class prefix.
+    CssVariablePrefix {
+        old_prefix: String,
+        new_prefix: String,
+    },
+    /// Update a dependency version in package.json.
+    UpdateDependency {
+        package: String,
+        new_version: String,
+    },
     /// No auto-fix available — flag for manual review.
     Manual,
     /// Send to LLM for fix generation.
     Llm,
+}
+
+/// A single mapping entry within a consolidated strategy.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MappingEntry {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub prop: Option<String>,
+}
+
+/// JSON-serializable strategy entry from `fix-strategies.json`.
+///
+/// For single-rule strategies, `from`/`to` hold the mapping.
+/// For consolidated rules, `mappings` holds all individual mappings from
+/// the merged rules, allowing the fix engine to apply all renames/removals.
+///
+/// ```json
+/// { "strategy": "Rename", "from": "Chip", "to": "Label",
+///   "mappings": [
+///     {"from": "Chip", "to": "Label"},
+///     {"from": "ChipGroup", "to": "LabelGroup"}
+///   ]
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyEntry {
+    pub strategy: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub prop: Option<String>,
+    /// npm package name (for UpdateDependency strategy).
+    #[serde(default)]
+    pub package: Option<String>,
+    /// New version range to set (for UpdateDependency strategy).
+    #[serde(default)]
+    pub new_version: Option<String>,
+    /// All individual mappings for consolidated rules.
+    #[serde(default)]
+    pub mappings: Vec<MappingEntry>,
+}
+
+impl StrategyEntry {
+    /// Convert a JSON strategy entry to a `FixStrategy`.
+    ///
+    /// When `mappings` is populated (consolidated rule), builds a multi-mapping
+    /// `FixStrategy::Rename` or extracts multiple `RemoveProp` targets.
+    pub fn to_fix_strategy(&self) -> FixStrategy {
+        match self.strategy.as_str() {
+            "Rename" => {
+                let mut renames: Vec<RenameMapping> = Vec::new();
+                // Collect from mappings array (consolidated rule)
+                for m in &self.mappings {
+                    if let (Some(from), Some(to)) = (&m.from, &m.to) {
+                        renames.push(RenameMapping {
+                            old: from.clone(),
+                            new: to.clone(),
+                        });
+                    }
+                }
+                // Fall back to top-level from/to (single-rule strategy)
+                if renames.is_empty() {
+                    if let (Some(from), Some(to)) = (&self.from, &self.to) {
+                        renames.push(RenameMapping {
+                            old: from.clone(),
+                            new: to.clone(),
+                        });
+                    }
+                }
+                if renames.is_empty() {
+                    FixStrategy::Manual
+                } else {
+                    FixStrategy::Rename(renames)
+                }
+            }
+            "RemoveProp" => FixStrategy::RemoveProp,
+            "CssVariablePrefix" => {
+                if let (Some(from), Some(to)) = (&self.from, &self.to) {
+                    FixStrategy::CssVariablePrefix {
+                        old_prefix: from.clone(),
+                        new_prefix: to.clone(),
+                    }
+                } else {
+                    FixStrategy::Manual
+                }
+            }
+            "ImportPathChange" => {
+                if let (Some(from), Some(to)) = (&self.from, &self.to) {
+                    FixStrategy::ImportPathChange {
+                        old_path: from.clone(),
+                        new_path: to.clone(),
+                    }
+                } else {
+                    FixStrategy::Manual
+                }
+            }
+            "UpdateDependency" => {
+                if let (Some(package), Some(new_version)) = (&self.package, &self.new_version) {
+                    FixStrategy::UpdateDependency {
+                        package: package.clone(),
+                        new_version: new_version.clone(),
+                    }
+                } else {
+                    FixStrategy::Manual
+                }
+            }
+            "PropValueChange" | "PropTypeChange" => FixStrategy::Llm,
+            "LlmAssisted" => FixStrategy::Llm,
+            _ => FixStrategy::Manual,
+        }
+    }
+}
+
+/// Load fix strategies from a JSON file.
+///
+/// Returns a map of rule_id -> FixStrategy.
+pub fn load_strategies_from_json(
+    path: &Path,
+) -> Result<BTreeMap<String, FixStrategy>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let entries: BTreeMap<String, StrategyEntry> = serde_json::from_str(&content)?;
+    let strategies = entries
+        .into_iter()
+        .map(|(rule_id, entry)| (rule_id, entry.to_fix_strategy()))
+        .collect();
+    Ok(strategies)
 }

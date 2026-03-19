@@ -140,12 +140,18 @@ pub fn run_goose_fix(request: &LlmFixRequest) -> Result<GooseFixResult> {
 }
 
 /// Run goose to fix multiple incidents in the same file (batched).
+///
+/// Scales the max turns with the number of fixes: base 5 (read + edit + write
+/// with margin) plus 1 extra turn per fix to allow the LLM room for multi-step
+/// edits, capped at 30 to avoid runaway sessions.
 pub fn run_goose_fix_batch(
     file_path: &PathBuf,
     requests: &[&LlmFixRequest],
 ) -> Result<GooseFixResult> {
     let prompt = build_batch_prompt(file_path, requests);
-    let (success, output) = run_goose_with_timeout(&prompt, "8")?;
+    let max_turns = (5 + requests.len()).min(30);
+    let max_turns_str = max_turns.to_string();
+    let (success, output) = run_goose_with_timeout(&prompt, &max_turns_str)?;
 
     Ok(GooseFixResult {
         file_path: file_path.clone(),
@@ -360,6 +366,15 @@ Instructions:
 3. Make the minimum edit necessary — do not change unrelated code
 4. Write the fixed file
 
+IMPORTANT constraints:
+- NEVER use deep import paths like '@patternfly/react-core/dist/esm/...' or '@patternfly/react-core/next'. Always use the public barrel import '@patternfly/react-core'.
+- NEVER replace PatternFly components (Button, MenuToggle, etc.) with raw HTML elements (<button>, <a>, <div>). If a component still exists in PF6, keep using it.
+- NEVER remove data-ouia-component-id, ouiaId, or other test identifier props unless the migration rule specifically says to.
+- NEVER invent or use component names that are not mentioned in the migration rules or already imported in the file. Only use components explicitly named in the rule message.
+- When adding new components (ModalHeader, ModalBody, ModalFooter, etc.), import them from the same package as the parent component.
+- If the migration rule says a component was "restructured" or "still exists", keep the component and only restructure its props/children as described. If the rule says a component was "removed" and tells you to remove the import, DO remove it and migrate to the replacement described in the rule.
+- When a prop migration says to pass a prop to a child component (e.g., 'actions → pass as children of <ModalFooter>'), you MUST create that child component element, import it, and render the prop value within it.
+
 Do not explain what you're doing. Just read the file, make the edit, and write it."#,
         file_path = request.file_path.display(),
         line = request.line,
@@ -370,12 +385,28 @@ Do not explain what you're doing. Just read the file, make the edit, and write i
 }
 
 fn build_batch_prompt(file_path: &PathBuf, requests: &[&LlmFixRequest]) -> String {
-    let mut fixes = String::new();
-    for (i, req) in requests.iter().enumerate() {
-        let code_context = req.code_snip.as_deref().unwrap_or("(no snippet)");
+    // Group requests by rule_id so that multiple incidents from the same rule
+    // (e.g., a multi-step composition rule firing at different lines) are merged
+    // into a single fix instruction with all affected lines listed together.
+    // This gives the LLM the full picture instead of seeing the same message
+    // repeated as separate fixes with narrow code snippets.
+    let mut by_rule: std::collections::BTreeMap<&str, Vec<&LlmFixRequest>> =
+        std::collections::BTreeMap::new();
+    for req in requests {
+        by_rule.entry(&req.rule_id).or_default().push(req);
+    }
 
-        fixes.push_str(&format!(
-            r#"
+    let mut fixes = String::new();
+    let mut fix_num = 0;
+    for (rule_id, rule_requests) in &by_rule {
+        fix_num += 1;
+
+        if rule_requests.len() == 1 {
+            // Single incident -- show as before
+            let req = rule_requests[0];
+            let code_context = req.code_snip.as_deref().unwrap_or("(no snippet)");
+            fixes.push_str(&format!(
+                r#"
 ### Fix {num}
 Line: {line}
 Rule [{rule_id}]:
@@ -386,12 +417,44 @@ Code context:
 {code_context}
 ```
 "#,
-            num = i + 1,
-            line = req.line,
-            rule_id = req.rule_id,
-            message = req.message,
-            code_context = code_context,
-        ));
+                num = fix_num,
+                line = req.line,
+                rule_id = rule_id,
+                message = req.message,
+                code_context = code_context,
+            ));
+        } else {
+            // Multiple incidents from the same rule -- merge into one fix
+            // with all affected lines and code contexts combined
+            let lines: Vec<String> = rule_requests.iter().map(|r| r.line.to_string()).collect();
+            let mut all_snippets = String::new();
+            for req in rule_requests {
+                if let Some(snip) = &req.code_snip {
+                    all_snippets.push_str(&format!("  (line {}):\n{}\n", req.line, snip));
+                }
+            }
+            // Use the message from the first request (they're all the same)
+            let message = &rule_requests[0].message;
+            fixes.push_str(&format!(
+                r#"
+### Fix {num}
+Lines: {lines}
+Rule [{rule_id}]:
+{message}
+
+This rule affects multiple locations in the file. Apply ALL steps together as one logical change.
+
+Code contexts:
+```
+{all_snippets}```
+"#,
+                num = fix_num,
+                lines = lines.join(", "),
+                rule_id = rule_id,
+                message = message,
+                all_snippets = all_snippets,
+            ));
+        }
     }
 
     format!(
@@ -407,9 +470,18 @@ Instructions:
 3. Make the minimum edits necessary — do not change unrelated code
 4. Write the fixed file once with all changes applied
 
+IMPORTANT constraints:
+- NEVER use deep import paths like '@patternfly/react-core/dist/esm/...' or '@patternfly/react-core/next'. Always use the public barrel import '@patternfly/react-core'.
+- NEVER replace PatternFly components (Button, MenuToggle, etc.) with raw HTML elements (<button>, <a>, <div>). If a component still exists in PF6, keep using it.
+- NEVER remove data-ouia-component-id, ouiaId, or other test identifier props unless the migration rule specifically says to.
+- NEVER invent or use component names that are not mentioned in the migration rules or already imported in the file. Only use components explicitly named in the rule message.
+- When adding new components (ModalHeader, ModalBody, ModalFooter, etc.), import them from the same package as the parent component.
+- If the migration rule says a component was "restructured" or "still exists", keep the component and only restructure its props/children as described. If the rule says a component was "removed" and tells you to remove the import, DO remove it and migrate to the replacement described in the rule.
+- When a prop migration says to pass a prop to a child component (e.g., 'actions → pass as children of <ModalFooter>'), you MUST create that child component element, import it, and render the prop value within it.
+
 Do not explain what you're doing. Just read the file, make the edits, and write it."#,
         file_path = file_path.display(),
-        count = requests.len(),
+        count = fix_num,
         fixes = fixes,
     )
 }
