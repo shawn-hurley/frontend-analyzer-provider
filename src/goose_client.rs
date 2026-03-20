@@ -141,15 +141,15 @@ pub fn run_goose_fix(request: &LlmFixRequest) -> Result<GooseFixResult> {
 
 /// Run goose to fix multiple incidents in the same file (batched).
 ///
-/// Scales the max turns with the number of fixes: base 5 (read + edit + write
-/// with margin) plus 1 extra turn per fix to allow the LLM room for multi-step
-/// edits, capped at 30 to avoid runaway sessions.
+/// Scales the max turns with the number of fixes: base 8 (read + edit + write
+/// with margin for multi-step edits) plus 1 extra turn per fix, capped at 30
+/// to avoid runaway sessions.
 pub fn run_goose_fix_batch(
     file_path: &PathBuf,
     requests: &[&LlmFixRequest],
 ) -> Result<GooseFixResult> {
     let prompt = build_batch_prompt(file_path, requests);
-    let max_turns = (5 + requests.len()).min(30);
+    let max_turns = (8 + requests.len()).min(40);
     let max_turns_str = max_turns.to_string();
     let (success, output) = run_goose_with_timeout(&prompt, &max_turns_str)?;
 
@@ -168,6 +168,10 @@ pub fn run_goose_fix_batch(
 /// Run goose fixes for all pending LLM requests.
 /// Groups requests by file path for batch processing.
 /// If `log_dir` is provided, saves prompts and responses to JSON files.
+/// Maximum number of files to process concurrently.
+/// Each file spawns a goose process, so this limits system load.
+const MAX_CONCURRENT_FILES: usize = 3;
+
 pub fn run_all_goose_fixes(
     requests: &[LlmFixRequest],
     verbose: bool,
@@ -187,243 +191,304 @@ pub fn run_all_goose_fixes(
     let total_files = by_file.len();
     let total_fixes = requests.len();
     eprintln!(
-        "  Processing {} fixes across {} files via goose...\n",
-        total_fixes, total_files
+        "  Processing {} fixes across {} files via goose ({} concurrent)...\n",
+        total_fixes, total_files, MAX_CONCURRENT_FILES
     );
 
-    let mut results = Vec::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
     let pipeline_start = std::time::Instant::now();
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let succeeded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    for (i, (file_path, file_requests)) in by_file.iter().enumerate() {
-        let file_name = file_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| file_path.display().to_string());
-
-        let rule_ids: Vec<&str> = file_requests.iter().map(|r| r.rule_id.as_str()).collect();
-        let rules_display = if rule_ids.len() <= 3 {
-            rule_ids.join(", ")
-        } else {
-            format!(
-                "{}, ... +{} more",
-                rule_ids[..2].join(", "),
-                rule_ids.len() - 2
-            )
-        };
-
-        eprintln!(
-            "  [{}/{}] {} ({} fixes)",
-            i + 1,
-            total_files,
-            file_name,
-            file_requests.len()
-        );
-        eprintln!("         rules: {}", rules_display);
-        eprint!("         goose: running...");
-
-        let file_start = std::time::Instant::now();
-
-        // Split large batches into chunks to avoid overwhelming the LLM.
-        // Each chunk runs sequentially -- the LLM reads the file as modified
-        // by the previous chunk. A context summary of previously applied
-        // fixes is prepended to each subsequent chunk.
-        let max_fixes_per_batch = 8;
-        let mut result: Result<GooseFixResult> = Ok(GooseFixResult {
-            file_path: file_path.clone(),
-            rule_id: String::new(),
-            success: true,
-            output: String::new(),
-        });
-        let mut all_prompts = Vec::new();
-        let mut applied_summaries: Vec<String> = Vec::new();
-
-        if file_requests.len() == 1 {
-            result = run_goose_fix(file_requests[0]);
-            all_prompts.push(build_prompt(file_requests[0]));
-        } else {
-            let chunks: Vec<&[&LlmFixRequest]> =
-                file_requests.chunks(max_fixes_per_batch).collect();
-            let chunk_count = chunks.len();
-
-            for (chunk_idx, chunk) in chunks.iter().enumerate() {
-                if chunk_idx > 0 {
-                    eprintln!(
-                        "\r         goose: chunk {}/{} ({} fixes)...",
-                        chunk_idx + 1,
-                        chunk_count,
-                        chunk.len()
-                    );
-                }
-
-                let prompt = build_batch_prompt_with_context(
-                    file_path,
-                    chunk,
-                    if applied_summaries.is_empty() {
-                        None
-                    } else {
-                        Some(&applied_summaries)
-                    },
-                );
-                all_prompts.push(prompt.clone());
-
-                let max_turns = (5 + chunk.len()).min(20);
-                let max_turns_str = max_turns.to_string();
-                let chunk_result = run_goose_with_timeout(&prompt, &max_turns_str);
-
-                match chunk_result {
-                    Ok((success, output)) => {
-                        // Record what was applied for context in next chunk
-                        for req in chunk.iter() {
-                            applied_summaries.push(format!(
-                                "- {} (line {}): {}",
-                                req.rule_id,
-                                req.line,
-                                req.message.lines().next().unwrap_or("")
-                            ));
-                        }
-                        result = Ok(GooseFixResult {
-                            file_path: file_path.clone(),
-                            rule_id: file_requests
-                                .iter()
-                                .map(|r| r.rule_id.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            success,
-                            output,
-                        });
-                        if !success {
-                            eprintln!(
-                                "\r         goose: chunk {}/{} failed, stopping",
-                                chunk_idx + 1,
-                                chunk_count
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        // Retry on timeout
-                        if format!("{}", e).contains("timed out") {
-                            let backoff = Duration::from_secs(10);
-                            eprintln!(
-                                "\r         goose: chunk {}/{} timed out, retrying...",
-                                chunk_idx + 1,
-                                chunk_count
-                            );
-                            std::thread::sleep(backoff);
-                            let retry_result = run_goose_with_timeout(&prompt, &max_turns_str);
-                            match retry_result {
-                                Ok((success, output)) => {
-                                    for req in chunk.iter() {
-                                        applied_summaries.push(format!(
-                                            "- {} (line {}): {}",
-                                            req.rule_id,
-                                            req.line,
-                                            req.message.lines().next().unwrap_or("")
-                                        ));
-                                    }
-                                    result = Ok(GooseFixResult {
-                                        file_path: file_path.clone(),
-                                        rule_id: file_requests
-                                            .iter()
-                                            .map(|r| r.rule_id.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
-                                        success,
-                                        output,
-                                    });
-                                }
-                                Err(e2) => {
-                                    result = Err(e2);
-                                    break;
-                                }
-                            }
-                        } else {
-                            result = Err(e);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let elapsed = file_start.elapsed();
-
-        // Build the prompt for logging (use the last prompt or combined)
-        let prompt_text = all_prompts.join("\n\n--- NEXT CHUNK ---\n\n");
-
-        match result {
-            Ok(r) => {
-                if r.success {
-                    succeeded += 1;
-                    eprintln!("\r         goose: ok ({:.1}s)", elapsed.as_secs_f64());
-                } else {
-                    failed += 1;
-                    eprintln!("\r         goose: FAILED ({:.1}s)", elapsed.as_secs_f64());
-                }
-                if verbose && !r.output.is_empty() {
-                    for line in r.output.lines().take(5) {
-                        eprintln!("           {}", line);
-                    }
-                }
-
-                // Save prompt + response to log file
-                if let Some(dir) = log_dir {
-                    let log_entry = serde_json::json!({
-                        "file": file_path.display().to_string(),
-                        "rule_ids": file_requests.iter().map(|r| &r.rule_id).collect::<Vec<_>>(),
-                        "prompt": prompt_text,
-                        "response": r.output,
-                        "success": r.success,
-                        "elapsed_secs": elapsed.as_secs_f64(),
-                    });
-                    let log_file = dir.join(format!("goose-fix-{:03}.json", i + 1));
-                    let _ = std::fs::write(
-                        &log_file,
-                        serde_json::to_string_pretty(&log_entry).unwrap_or_default(),
-                    );
-                }
-
-                results.push(r);
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!(
-                    "\r         goose: ERROR ({:.1}s) — {}",
-                    elapsed.as_secs_f64(),
-                    e
-                );
-                results.push(GooseFixResult {
-                    file_path: file_path.clone(),
-                    rule_id: file_requests
-                        .iter()
-                        .map(|r| r.rule_id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    success: false,
-                    output: format!("Error: {}", e),
-                });
-            }
-        }
-        eprintln!();
-
-        // Delay between calls to avoid rate limiting
-        if i + 1 < total_files && GOOSE_DELAY_SECS > 0 {
-            std::thread::sleep(Duration::from_secs(GOOSE_DELAY_SECS));
-        }
+    // Use a channel as a simple concurrency limiter (semaphore)
+    let (sem_tx, sem_rx) = std::sync::mpsc::sync_channel::<()>(MAX_CONCURRENT_FILES);
+    for _ in 0..MAX_CONCURRENT_FILES {
+        sem_tx.send(()).unwrap();
     }
 
+    let file_entries: Vec<(usize, PathBuf, Vec<&LlmFixRequest>)> = by_file
+        .into_iter()
+        .enumerate()
+        .map(|(i, (path, reqs))| (i, path, reqs))
+        .collect();
+
+    let results: Vec<GooseFixResult> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+
+        for (i, file_path, file_requests) in &file_entries {
+            // Acquire semaphore slot (blocks until a slot is free)
+            sem_rx.recv().unwrap();
+
+            let sem_tx = sem_tx.clone();
+            let done = completed.clone();
+            let ok_count = succeeded.clone();
+            let fail_count = failed_count.clone();
+            let i = *i;
+            let log_dir = log_dir;
+
+            let handle = s.spawn(move || {
+                let result =
+                    process_single_file(i, total_files, file_path, file_requests, verbose, log_dir);
+
+                let idx = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                match &result {
+                    r if r.success => {
+                        ok_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    _ => {
+                        fail_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                eprintln!("  [{}/{}] complete", idx, total_files,);
+
+                // Release semaphore slot
+                let _ = sem_tx.send(());
+                result
+            });
+
+            handles.push(handle);
+        }
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
     let total_elapsed = pipeline_start.elapsed();
+    let ok = succeeded.load(std::sync::atomic::Ordering::Relaxed);
+    let fail = failed_count.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "  Goose complete: {} succeeded, {} failed ({:.0}s total, {:.1}s avg per file)",
-        succeeded,
-        failed,
+        ok,
+        fail,
         total_elapsed.as_secs_f64(),
         total_elapsed.as_secs_f64() / total_files.max(1) as f64,
     );
 
     results
+}
+
+/// Process all fixes for a single file. Chunks are processed sequentially
+/// within the file (each chunk reads the file as modified by the previous).
+/// This function is called from parallel threads — one per file.
+fn process_single_file(
+    file_index: usize,
+    total_files: usize,
+    file_path: &PathBuf,
+    file_requests: &[&LlmFixRequest],
+    verbose: bool,
+    log_dir: Option<&std::path::Path>,
+) -> GooseFixResult {
+    let file_name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_path.display().to_string());
+
+    let rule_ids: Vec<&str> = file_requests.iter().map(|r| r.rule_id.as_str()).collect();
+    let rules_display = if rule_ids.len() <= 3 {
+        rule_ids.join(", ")
+    } else {
+        format!(
+            "{}, ... +{} more",
+            rule_ids[..2].join(", "),
+            rule_ids.len() - 2
+        )
+    };
+
+    eprintln!(
+        "  [{}/{}] {} ({} fixes) [{}]",
+        file_index + 1,
+        total_files,
+        file_name,
+        file_requests.len(),
+        rules_display,
+    );
+
+    let file_start = std::time::Instant::now();
+
+    // Split large batches into chunks to avoid overwhelming the LLM.
+    // Each chunk runs sequentially — the LLM reads the file as modified
+    // by the previous chunk. A context summary of previously applied
+    // fixes is prepended to each subsequent chunk.
+    let max_fixes_per_batch = 8;
+    let mut result: Result<GooseFixResult> = Ok(GooseFixResult {
+        file_path: file_path.clone(),
+        rule_id: String::new(),
+        success: true,
+        output: String::new(),
+    });
+    let mut all_prompts = Vec::new();
+    let mut applied_summaries: Vec<String> = Vec::new();
+
+    if file_requests.len() == 1 {
+        result = run_goose_fix(file_requests[0]);
+        all_prompts.push(build_prompt(file_requests[0]));
+    } else {
+        let chunks: Vec<&[&LlmFixRequest]> = file_requests.chunks(max_fixes_per_batch).collect();
+        let chunk_count = chunks.len();
+
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            if chunk_idx > 0 {
+                eprintln!(
+                    "         {}: chunk {}/{} ({} fixes)...",
+                    file_name,
+                    chunk_idx + 1,
+                    chunk_count,
+                    chunk.len()
+                );
+            }
+
+            let prompt = build_batch_prompt_with_context(
+                file_path,
+                chunk,
+                if applied_summaries.is_empty() {
+                    None
+                } else {
+                    Some(&applied_summaries)
+                },
+            );
+            all_prompts.push(prompt.clone());
+
+            let max_turns = (8 + chunk.len()).min(40);
+            let max_turns_str = max_turns.to_string();
+            let chunk_result = run_goose_with_timeout(&prompt, &max_turns_str);
+
+            match chunk_result {
+                Ok((success, output)) => {
+                    // Record what was applied for context in next chunk
+                    for req in chunk.iter() {
+                        applied_summaries.push(format!(
+                            "- {} (line {}): {}",
+                            req.rule_id,
+                            req.line,
+                            req.message.lines().next().unwrap_or("")
+                        ));
+                    }
+                    result = Ok(GooseFixResult {
+                        file_path: file_path.clone(),
+                        rule_id: file_requests
+                            .iter()
+                            .map(|r| r.rule_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        success,
+                        output,
+                    });
+                    if !success {
+                        eprintln!(
+                            "         {}: chunk {}/{} FAILED, stopping",
+                            file_name,
+                            chunk_idx + 1,
+                            chunk_count
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // Retry on timeout
+                    if format!("{}", e).contains("timed out") {
+                        let backoff = Duration::from_secs(10);
+                        eprintln!(
+                            "         {}: chunk {}/{} timed out, retrying...",
+                            file_name,
+                            chunk_idx + 1,
+                            chunk_count
+                        );
+                        std::thread::sleep(backoff);
+                        let retry_result = run_goose_with_timeout(&prompt, &max_turns_str);
+                        match retry_result {
+                            Ok((success, output)) => {
+                                for req in chunk.iter() {
+                                    applied_summaries.push(format!(
+                                        "- {} (line {}): {}",
+                                        req.rule_id,
+                                        req.line,
+                                        req.message.lines().next().unwrap_or("")
+                                    ));
+                                }
+                                result = Ok(GooseFixResult {
+                                    file_path: file_path.clone(),
+                                    rule_id: file_requests
+                                        .iter()
+                                        .map(|r| r.rule_id.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                    success,
+                                    output,
+                                });
+                            }
+                            Err(e2) => {
+                                result = Err(e2);
+                                break;
+                            }
+                        }
+                    } else {
+                        result = Err(e);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let elapsed = file_start.elapsed();
+
+    // Build the prompt for logging
+    let prompt_text = all_prompts.join("\n\n--- NEXT CHUNK ---\n\n");
+
+    match result {
+        Ok(r) => {
+            if r.success {
+                eprintln!("         {}: ok ({:.1}s)", file_name, elapsed.as_secs_f64());
+            } else {
+                eprintln!(
+                    "         {}: FAILED ({:.1}s)",
+                    file_name,
+                    elapsed.as_secs_f64()
+                );
+            }
+            if verbose && !r.output.is_empty() {
+                for line in r.output.lines().take(5) {
+                    eprintln!("           {}", line);
+                }
+            }
+
+            // Save prompt + response to log file
+            if let Some(dir) = log_dir {
+                let log_entry = serde_json::json!({
+                    "file": file_path.display().to_string(),
+                    "rule_ids": file_requests.iter().map(|r| &r.rule_id).collect::<Vec<_>>(),
+                    "prompt": prompt_text,
+                    "response": r.output,
+                    "success": r.success,
+                    "elapsed_secs": elapsed.as_secs_f64(),
+                });
+                let log_file = dir.join(format!("goose-fix-{:03}.json", file_index + 1));
+                let _ = std::fs::write(
+                    &log_file,
+                    serde_json::to_string_pretty(&log_entry).unwrap_or_default(),
+                );
+            }
+
+            r
+        }
+        Err(e) => {
+            eprintln!(
+                "         {}: ERROR ({:.1}s) — {}",
+                file_name,
+                elapsed.as_secs_f64(),
+                e
+            );
+            GooseFixResult {
+                file_path: file_path.clone(),
+                rule_id: file_requests
+                    .iter()
+                    .map(|r| r.rule_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                success: false,
+                output: format!("Error: {}", e),
+            }
+        }
+    }
 }
 
 // ── Prompt construction ───────────────────────────────────────────────────
@@ -462,6 +527,10 @@ IMPORTANT constraints:
 - When adding new components (ModalHeader, ModalBody, ModalFooter, etc.), import them from the same package as the parent component.
 - If the migration rule says a component was "restructured" or "still exists", keep the component and only restructure its props/children as described. If the rule says a component was "removed" and tells you to remove the import, DO remove it and migrate to the replacement described in the rule.
 - When a prop migration says to pass a prop to a child component (e.g., 'actions → pass as children of <ModalFooter>'), you MUST create that child component element, import it, and render the prop value within it.
+- Props can be passed in multiple ways — look for ALL of them when migrating a removed prop:
+  * Direct: `propName={{value}}`
+  * Conditional spread: `{{...(value && {{ propName: value }})}}` or `{{...(condition && {{ propName }})}}` — convert the condition to wrap the new child component, e.g., `{{value && <ChildComponent>{{value}}</ChildComponent>}}`
+  * Object spread: `{{...props}}` — check if the spread object contains the removed prop
 
 Do not explain what you're doing. Just read the file, make the edit, and write it."#,
         file_path = request.file_path.display(),
@@ -587,6 +656,10 @@ IMPORTANT constraints:
 - When adding new components (ModalHeader, ModalBody, ModalFooter, etc.), import them from the same package as the parent component.
 - If the migration rule says a component was "restructured" or "still exists", keep the component and only restructure its props/children as described. If the rule says a component was "removed" and tells you to remove the import, DO remove it and migrate to the replacement described in the rule.
 - When a prop migration says to pass a prop to a child component (e.g., 'actions → pass as children of <ModalFooter>'), you MUST create that child component element, import it, and render the prop value within it.
+- Props can be passed in multiple ways — look for ALL of them when migrating a removed prop:
+  * Direct: `propName={{value}}`
+  * Conditional spread: `{{...(value && {{ propName: value }})}}` or `{{...(condition && {{ propName }})}}` — convert the condition to wrap the new child component, e.g., `{{value && <ChildComponent>{{value}}</ChildComponent>}}`
+  * Object spread: `{{...props}}` — check if the spread object contains the removed prop
 
 Do not explain what you're doing. Just read the file, make the edits, and write it."#,
         file_path = file_path.display(),
