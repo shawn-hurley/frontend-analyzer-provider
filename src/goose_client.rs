@@ -225,45 +225,133 @@ pub fn run_all_goose_fixes(
 
         let file_start = std::time::Instant::now();
 
-        // Run with retry on timeout
-        let mut result = if file_requests.len() == 1 {
-            run_goose_fix(file_requests[0])
-        } else {
-            run_goose_fix_batch(file_path, file_requests)
-        };
+        // Split large batches into chunks to avoid overwhelming the LLM.
+        // Each chunk runs sequentially -- the LLM reads the file as modified
+        // by the previous chunk. A context summary of previously applied
+        // fixes is prepended to each subsequent chunk.
+        let max_fixes_per_batch = 8;
+        let mut result: Result<GooseFixResult> = Ok(GooseFixResult {
+            file_path: file_path.clone(),
+            rule_id: String::new(),
+            success: true,
+            output: String::new(),
+        });
+        let mut all_prompts = Vec::new();
+        let mut applied_summaries: Vec<String> = Vec::new();
 
-        // Retry on timeout
-        for retry in 0..GOOSE_MAX_RETRIES {
-            if let Err(ref e) = result {
-                if format!("{}", e).contains("timed out") {
-                    let backoff = Duration::from_secs(5 * (retry as u64 + 1));
+        if file_requests.len() == 1 {
+            result = run_goose_fix(file_requests[0]);
+            all_prompts.push(build_prompt(file_requests[0]));
+        } else {
+            let chunks: Vec<&[&LlmFixRequest]> =
+                file_requests.chunks(max_fixes_per_batch).collect();
+            let chunk_count = chunks.len();
+
+            for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                if chunk_idx > 0 {
                     eprintln!(
-                        "\r         goose: timed out, retrying after {}s backoff...",
-                        backoff.as_secs()
+                        "\r         goose: chunk {}/{} ({} fixes)...",
+                        chunk_idx + 1,
+                        chunk_count,
+                        chunk.len()
                     );
-                    std::thread::sleep(backoff);
-                    eprint!("         goose: retry {}...", retry + 1);
-                    result = if file_requests.len() == 1 {
-                        run_goose_fix(file_requests[0])
-                    } else {
-                        run_goose_fix_batch(file_path, file_requests)
-                    };
-                } else {
-                    break;
                 }
-            } else {
-                break;
+
+                let prompt = build_batch_prompt_with_context(
+                    file_path,
+                    chunk,
+                    if applied_summaries.is_empty() {
+                        None
+                    } else {
+                        Some(&applied_summaries)
+                    },
+                );
+                all_prompts.push(prompt.clone());
+
+                let max_turns = (5 + chunk.len()).min(20);
+                let max_turns_str = max_turns.to_string();
+                let chunk_result = run_goose_with_timeout(&prompt, &max_turns_str);
+
+                match chunk_result {
+                    Ok((success, output)) => {
+                        // Record what was applied for context in next chunk
+                        for req in chunk.iter() {
+                            applied_summaries.push(format!(
+                                "- {} (line {}): {}",
+                                req.rule_id,
+                                req.line,
+                                req.message.lines().next().unwrap_or("")
+                            ));
+                        }
+                        result = Ok(GooseFixResult {
+                            file_path: file_path.clone(),
+                            rule_id: file_requests
+                                .iter()
+                                .map(|r| r.rule_id.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            success,
+                            output,
+                        });
+                        if !success {
+                            eprintln!(
+                                "\r         goose: chunk {}/{} failed, stopping",
+                                chunk_idx + 1,
+                                chunk_count
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // Retry on timeout
+                        if format!("{}", e).contains("timed out") {
+                            let backoff = Duration::from_secs(10);
+                            eprintln!(
+                                "\r         goose: chunk {}/{} timed out, retrying...",
+                                chunk_idx + 1,
+                                chunk_count
+                            );
+                            std::thread::sleep(backoff);
+                            let retry_result = run_goose_with_timeout(&prompt, &max_turns_str);
+                            match retry_result {
+                                Ok((success, output)) => {
+                                    for req in chunk.iter() {
+                                        applied_summaries.push(format!(
+                                            "- {} (line {}): {}",
+                                            req.rule_id,
+                                            req.line,
+                                            req.message.lines().next().unwrap_or("")
+                                        ));
+                                    }
+                                    result = Ok(GooseFixResult {
+                                        file_path: file_path.clone(),
+                                        rule_id: file_requests
+                                            .iter()
+                                            .map(|r| r.rule_id.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        success,
+                                        output,
+                                    });
+                                }
+                                Err(e2) => {
+                                    result = Err(e2);
+                                    break;
+                                }
+                            }
+                        } else {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
             }
         }
 
         let elapsed = file_start.elapsed();
 
-        // Build the prompt for logging
-        let prompt_text = if file_requests.len() == 1 {
-            build_prompt(file_requests[0])
-        } else {
-            build_batch_prompt(file_path, &file_requests)
-        };
+        // Build the prompt for logging (use the last prompt or combined)
+        let prompt_text = all_prompts.join("\n\n--- NEXT CHUNK ---\n\n");
 
         match result {
             Ok(r) => {
@@ -385,6 +473,14 @@ Do not explain what you're doing. Just read the file, make the edit, and write i
 }
 
 fn build_batch_prompt(file_path: &PathBuf, requests: &[&LlmFixRequest]) -> String {
+    build_batch_prompt_with_context(file_path, requests, None)
+}
+
+fn build_batch_prompt_with_context(
+    file_path: &PathBuf,
+    requests: &[&LlmFixRequest],
+    previously_applied: Option<&[String]>,
+) -> String {
     // Group requests by rule_id so that multiple incidents from the same rule
     // (e.g., a multi-step composition rule firing at different lines) are merged
     // into a single fix instruction with all affected lines listed together.
@@ -457,18 +553,31 @@ Code contexts:
         }
     }
 
+    let context_section = if let Some(applied) = previously_applied {
+        format!(
+            "\n## Previously applied fixes (DO NOT revert these):\n\
+             The following fixes were already applied to this file in a previous pass.\n\
+             The file on disk already reflects these changes. Do NOT undo them.\n\
+             {}\n\n",
+            applied.join("\n")
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r#"You are applying PatternFly v5 to v6 migration fixes to a single file.
 
 File: {file_path}
-
+{context_section}
 Apply ALL of the following {count} fixes to this file:
 {fixes}
 Instructions:
 1. Read the file at {file_path}
 2. Apply ALL {count} fixes described above
 3. Make the minimum edits necessary — do not change unrelated code
-4. Write the fixed file once with all changes applied
+4. Do NOT revert any changes that were already applied in previous passes
+5. Write the fixed file once with all changes applied
 
 IMPORTANT constraints:
 - NEVER use deep import paths like '@patternfly/react-core/dist/esm/...' or '@patternfly/react-core/next'. Always use the public barrel import '@patternfly/react-core'.
@@ -481,6 +590,7 @@ IMPORTANT constraints:
 
 Do not explain what you're doing. Just read the file, make the edits, and write it."#,
         file_path = file_path.display(),
+        context_section = context_section,
         count = fix_num,
         fixes = fixes,
     )
