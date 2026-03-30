@@ -1,0 +1,171 @@
+name: Release to crates.io
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Pre-release checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & build
+        uses: https://github.com/actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify tag matches root Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "Version $TAG confirmed."
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release
+        run: cargo build --workspace --release
+
+  publish:
+    name: Publish to crates.io
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: https://github.com/dtolnay/rust-toolchain@stable
+
+      - name: Publish frontend-core
+        run: cargo publish --package frontend-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish frontend-js-scanner
+        run: cargo publish --package frontend-js-scanner
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish frontend-css-scanner
+        run: cargo publish --package frontend-css-scanner
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish frontend-fix-engine
+        run: cargo publish --package frontend-fix-engine
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish frontend-grpc
+        run: cargo publish --package frontend-grpc
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish patternfly-fix-context
+        run: cargo publish --package patternfly-fix-context
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish frontend-analyzer-provider
+        run: cargo publish --package frontend-analyzer-provider
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  version-bump:
+    name: Bump version for next development cycle
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: https://github.com/actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "forgejo-actions[bot]"
+          git config user.email "forgejo-actions[bot]@noreply.localhost"
+
+      - name: Compute next patch version
+        id: next
+        run: |
+          CURRENT="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          MAJOR="$(echo "$CURRENT" | cut -d. -f1)"
+          MINOR="$(echo "$CURRENT" | cut -d. -f2)"
+          PATCH="$(echo "$CURRENT" | cut -d. -f3)"
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Bump all Cargo.toml versions
+        run: |
+          CURRENT="${{ steps.next.outputs.current }}"
+          NEXT="${{ steps.next.outputs.next }}"
+          for manifest in \
+            Cargo.toml \
+            crates/core/Cargo.toml \
+            crates/js-scanner/Cargo.toml \
+            crates/css-scanner/Cargo.toml \
+            crates/grpc/Cargo.toml \
+            crates/fix-engine/Cargo.toml \
+            crates/patternfly-fix-context/Cargo.toml; do
+            sed -i "s/^version *= *\"${CURRENT}\"/version = \"${NEXT}\"/" "$manifest"
+          done
+
+      - name: Create branch and commit
+        run: |
+          BRANCH="chore/bump-v${{ steps.next.outputs.next }}"
+          git checkout -b "$BRANCH"
+          git add Cargo.toml crates/*/Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.next.outputs.next }}"
+          git push origin "$BRANCH"
+
+      - name: Open pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="chore/bump-v${{ steps.next.outputs.next }}"
+          BODY="Automated version bump after publishing v${{ steps.next.outputs.current }} to crates.io."
+          # Forgejo API -- compatible with Gitea
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\":\"chore: bump version to ${{ steps.next.outputs.next }}\",\"body\":\"${BODY}\",\"head\":\"${BRANCH}\",\"base\":\"main\"}" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/pulls"

@@ -3,6 +3,8 @@
 //! Finds JSX component usage (`<Button ...>`) and JSX prop usage (`<X isActive={...}>`).
 //! Walks the AST recursively to find JSXOpeningElement nodes.
 
+#![allow(clippy::too_many_arguments)]
+
 use crate::scanner::make_incident;
 use frontend_core::capabilities::ReferenceLocation;
 use frontend_core::incident::Incident;

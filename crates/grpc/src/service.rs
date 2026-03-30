@@ -1,12 +1,12 @@
 //! Konveyor ProviderService gRPC implementation.
 
-use crate::proto::*;
 use crate::proto::provider_service_server::ProviderService;
+use crate::proto::*;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
-use std::pin::Pin;
 
 /// The frontend analyzer provider.
 pub struct FrontendProvider {
@@ -56,10 +56,7 @@ impl ProviderService for FrontendProvider {
         Ok(Response::new(CapabilitiesResponse { capabilities }))
     }
 
-    async fn init(
-        &self,
-        request: Request<Config>,
-    ) -> Result<Response<InitResponse>, Status> {
+    async fn init(&self, request: Request<Config>) -> Result<Response<InitResponse>, Status> {
         let config = request.into_inner();
         let location = config.location.clone();
 
@@ -75,8 +72,14 @@ impl ProviderService for FrontendProvider {
             }));
         }
 
-        *self.config.lock().map_err(|_| Status::internal("Config lock poisoned"))? = Some(config);
-        *self.project_root.lock().map_err(|_| Status::internal("Project root lock poisoned"))? = Some(root);
+        *self
+            .config
+            .lock()
+            .map_err(|_| Status::internal("Config lock poisoned"))? = Some(config);
+        *self
+            .project_root
+            .lock()
+            .map_err(|_| Status::internal("Project root lock poisoned"))? = Some(root);
 
         Ok(Response::new(InitResponse {
             error: String::new(),
@@ -98,7 +101,11 @@ impl ProviderService for FrontendProvider {
             .clone()
             .ok_or_else(|| Status::failed_precondition("Provider not initialized"))?;
 
-        tracing::info!("Evaluate request: cap={}, condition_info={}", &req.cap, &req.condition_info);
+        tracing::info!(
+            "Evaluate request: cap={}, condition_info={}",
+            &req.cap,
+            &req.condition_info
+        );
         match crate::evaluate::evaluate_condition(&root, &req.cap, &req.condition_info) {
             Ok(response) => Ok(Response::new(EvaluateResponse {
                 error: String::new(),
@@ -113,10 +120,7 @@ impl ProviderService for FrontendProvider {
         }
     }
 
-    async fn stop(
-        &self,
-        _request: Request<ServiceRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn stop(&self, _request: Request<ServiceRequest>) -> Result<Response<()>, Status> {
         tracing::info!("Frontend provider stopping");
         Ok(Response::new(()))
     }

@@ -99,7 +99,7 @@ fn walk_expr(
 ) {
     match expr {
         Expression::CallExpression(call) => {
-            let callee_name = callee_to_string(&call.callee, source);
+            let callee_name = callee_to_string(&call.callee);
             if let Some(name) = &callee_name {
                 if pattern.is_match(name) {
                     let span = call.callee.span();
@@ -134,11 +134,11 @@ fn walk_expr(
     }
 }
 
-fn callee_to_string(callee: &Expression<'_>, source: &str) -> Option<String> {
+fn callee_to_string(callee: &Expression<'_>) -> Option<String> {
     match callee {
         Expression::Identifier(ident) => Some(ident.name.to_string()),
         Expression::StaticMemberExpression(member) => {
-            let obj = callee_to_string(&member.object, source)?;
+            let obj = callee_to_string(&member.object)?;
             Some(format!("{}.{}", obj, member.property.name))
         }
         _ => None,

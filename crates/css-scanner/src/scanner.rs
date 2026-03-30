@@ -26,7 +26,7 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Collect all CSS/SCSS files in a project directory.
 pub fn collect_css_files(root: &Path, file_pattern: Option<&str>) -> Result<Vec<PathBuf>> {
-    let pattern_re = file_pattern.map(|p| Regex::new(p)).transpose()?;
+    let pattern_re = file_pattern.map(Regex::new).transpose()?;
 
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_entry(|e| {

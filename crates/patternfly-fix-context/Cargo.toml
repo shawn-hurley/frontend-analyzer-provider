@@ -1,6 +1,6 @@
 [package]
 name = "patternfly-fix-context"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "PatternFly v5-to-v6 migration context for the fix engine's LLM-assisted fixes"
 license = "Apache-2.0"

@@ -1,13 +1,13 @@
 [package]
 name = "frontend-fix-engine"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Fix engine for applying pattern-based and LLM-assisted code migration fixes"
 license = "Apache-2.0"
 
 [dependencies]
 frontend-core = { path = "../core" }
-konveyor-core = { path = "../konveyor-core" }
+konveyor-core = "0.0.1"
 
 # Error handling
 anyhow = "1"

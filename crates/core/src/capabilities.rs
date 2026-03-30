@@ -111,19 +111,19 @@ impl ProviderCondition {
     pub fn parse(capability: &str, condition_yaml: &str) -> anyhow::Result<Self> {
         match capability {
             "referenced" => {
-                let cond: ReferencedCondition = serde_yml::from_str(condition_yaml)?;
+                let cond: ReferencedCondition = yaml_serde::from_str(condition_yaml)?;
                 Ok(ProviderCondition::Referenced(cond))
             }
             "cssclass" => {
-                let cond: CssClassCondition = serde_yml::from_str(condition_yaml)?;
+                let cond: CssClassCondition = yaml_serde::from_str(condition_yaml)?;
                 Ok(ProviderCondition::CssClass(cond))
             }
             "cssvar" => {
-                let cond: CssVarCondition = serde_yml::from_str(condition_yaml)?;
+                let cond: CssVarCondition = yaml_serde::from_str(condition_yaml)?;
                 Ok(ProviderCondition::CssVar(cond))
             }
             "dependency" => {
-                let cond: DependencyCondition = serde_yml::from_str(condition_yaml)?;
+                let cond: DependencyCondition = yaml_serde::from_str(condition_yaml)?;
                 Ok(ProviderCondition::Dependency(cond))
             }
             _ => anyhow::bail!("Unknown capability: {capability}"),

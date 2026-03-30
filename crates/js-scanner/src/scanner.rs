@@ -34,7 +34,7 @@ const JS_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "mts"];
 
 /// Collect all JS/TS/JSX/TSX files in a project directory.
 pub fn collect_files(root: &Path, file_pattern: Option<&str>) -> Result<Vec<PathBuf>> {
-    let pattern_re = file_pattern.map(|p| Regex::new(p)).transpose()?;
+    let pattern_re = file_pattern.map(Regex::new).transpose()?;
 
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_entry(|e| {

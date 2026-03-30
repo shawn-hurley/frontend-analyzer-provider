@@ -19,10 +19,10 @@ use std::os::unix::process::CommandExt;
 const GOOSE_TIMEOUT_SECS: u64 = 120;
 
 /// Delay between consecutive goose calls to avoid rate limiting (seconds).
-const GOOSE_DELAY_SECS: u64 = 2;
+const _GOOSE_DELAY_SECS: u64 = 2;
 
 /// Maximum retries when a goose call times out.
-const GOOSE_MAX_RETRIES: u32 = 1;
+const _GOOSE_MAX_RETRIES: u32 = 1;
 
 /// Result of a goose fix attempt.
 #[derive(Debug)]
@@ -83,7 +83,7 @@ fn run_goose_with_timeout(prompt: &str, max_turns: &str) -> Result<(bool, String
                         buf
                     })
                     .unwrap_or_default();
-                let stderr = child
+                let _stderr = child
                     .stderr
                     .take()
                     .map(|mut s| {
@@ -137,7 +137,6 @@ fn run_goose_with_timeout(prompt: &str, max_turns: &str) -> Result<(bool, String
 /// Run goose fixes for all pending LLM requests.
 /// Groups requests by file path for batch processing.
 /// If `log_dir` is provided, saves prompts and responses to JSON files.
-
 /// An LLM fix request with multiple incidents from the same rule merged
 /// into a single entry. This preserves the priority-based sort order
 /// (hierarchy rules first) rather than re-sorting by rule_id.
@@ -313,7 +312,6 @@ pub fn run_all_goose_fixes(
             let ok_count = succeeded.clone();
             let fail_count = failed_count.clone();
             let i = *i;
-            let log_dir = log_dir;
 
             let handle = s.spawn(move || {
                 let result = process_single_file(
@@ -368,7 +366,7 @@ pub fn run_all_goose_fixes(
 fn process_single_file(
     file_index: usize,
     total_files: usize,
-    file_path: &PathBuf,
+    file_path: &std::path::Path,
     file_requests: &[MergedLlmFixRequest],
     ctx: &dyn FixContext,
     verbose: bool,
@@ -407,7 +405,7 @@ fn process_single_file(
     // fixes is prepended to each subsequent chunk.
     let max_fixes_per_batch = 8;
     let mut result: Result<GooseFixResult> = Ok(GooseFixResult {
-        file_path: file_path.clone(),
+        file_path: file_path.to_path_buf(),
         rule_id: String::new(),
         success: true,
         output: String::new(),
@@ -441,7 +439,7 @@ fn process_single_file(
                 chunk_times.push(0.0);
                 chunk_retried.push(was_retried);
                 result = Ok(GooseFixResult {
-                    file_path: file_path.clone(),
+                    file_path: file_path.to_path_buf(),
                     rule_id: file_requests[0].rule_id.clone(),
                     success,
                     output,
@@ -615,7 +613,7 @@ fn process_single_file(
                     }
                     all_outputs.push(output.clone());
                     result = Ok(GooseFixResult {
-                        file_path: file_path.clone(),
+                        file_path: file_path.to_path_buf(),
                         rule_id: file_requests
                             .iter()
                             .map(|r| r.rule_id.as_str())
@@ -648,10 +646,10 @@ fn process_single_file(
                             backoff.as_secs(),
                         );
                         std::thread::sleep(backoff);
-                        let retry_start = std::time::Instant::now();
+                        let _retry_start = std::time::Instant::now();
                         let retry_result = run_goose_with_timeout(&prompt, &max_turns_str);
                         match retry_result {
-                            Ok((success, output, retry_stderr)) => {
+                            Ok((success, output, _retry_stderr)) => {
                                 for req in chunk.iter() {
                                     let lines_display = req
                                         .lines
@@ -672,7 +670,7 @@ fn process_single_file(
                                 }
                                 all_outputs.push(output.clone());
                                 result = Ok(GooseFixResult {
-                                    file_path: file_path.clone(),
+                                    file_path: file_path.to_path_buf(),
                                     rule_id: file_requests
                                         .iter()
                                         .map(|r| r.rule_id.as_str())
@@ -765,7 +763,7 @@ fn process_single_file(
                 e
             );
             GooseFixResult {
-                file_path: file_path.clone(),
+                file_path: file_path.to_path_buf(),
                 rule_id: file_requests
                     .iter()
                     .map(|r| r.rule_id.as_str())
@@ -842,7 +840,7 @@ Before writing, reason through the fix step by step to ensure nothing is missed.
 }
 
 fn build_batch_prompt_with_context(
-    file_path: &PathBuf,
+    file_path: &std::path::Path,
     requests: &[&MergedLlmFixRequest],
     previously_applied: Option<&[String]>,
     ctx: &dyn FixContext,
@@ -916,11 +914,10 @@ Code contexts:
 
     let revert_warning = ctx.revert_warnings().unwrap_or("");
     let context_section = if let Some(applied) = previously_applied {
-        let mut section = format!(
-            "\n## Previously attempted fixes:\n\
+        let mut section = "\n## Previously attempted fixes:\n\
              The following fixes were attempted in a previous pass. Most should already\n\
              be applied to the file on disk. Do NOT revert changes that are already correct.\n"
-        );
+            .to_string();
         if !revert_warning.is_empty() {
             section.push_str(revert_warning);
             section.push('\n');

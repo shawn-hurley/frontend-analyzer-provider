@@ -1,6 +1,6 @@
 [package]
 name = "frontend-js-scanner"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "OXC-based JS/TS/JSX/TSX analysis for frontend-analyzer-provider"
 

@@ -69,13 +69,8 @@ pub async fn run(opts: FixOpts) -> Result<()> {
         if trimmed.starts_with('[') || trimmed.starts_with('{') {
             serde_json::from_str(&input_content)?
         } else {
-            // Try YAML — serde_yml can panic on large multiline strings,
-            // so catch panics gracefully
-            match std::panic::catch_unwind(|| serde_yml::from_str::<Vec<konveyor_core::report::RuleSet>>(&input_content)) {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => anyhow::bail!("Failed to parse YAML input: {}. Try using --output-format json with the analyze command.", e),
-                Err(_) => anyhow::bail!("YAML parser crashed on input file. Use --output-format json with the analyze command instead."),
-            }
+            // Parse YAML using yaml_serde (pure-Rust yaml-rust2 backend).
+            yaml_serde::from_str::<Vec<konveyor_core::report::RuleSet>>(&input_content)?
         }
     };
 
@@ -85,10 +80,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
 
     // Resolve the fix context from the first ruleset name in the analysis output.
     // All rulesets in a single analysis run typically share the same framework.
-    let ruleset_name = output
-        .first()
-        .map(|rs| rs.name.as_str())
-        .unwrap_or("");
+    let ruleset_name = output.first().map(|rs| rs.name.as_str()).unwrap_or("");
     let fix_context = context_registry.get(ruleset_name);
 
     let total_violations: usize = output.iter().map(|rs| rs.violations.len()).sum();
@@ -109,7 +101,10 @@ pub async fn run(opts: FixOpts) -> Result<()> {
 
     // 1. Load rule-adjacent strategies (bundled with rules)
     if let Some(ref rules_strategies_path) = opts.rules_strategies {
-        eprintln!("Loading rule strategies from {}", rules_strategies_path.display());
+        eprintln!(
+            "Loading rule strategies from {}",
+            rules_strategies_path.display()
+        );
         match frontend_core::fix::load_strategies_from_json(rules_strategies_path) {
             Ok(strats) => {
                 eprintln!("  Loaded {} rule strategies", strats.len());
@@ -124,7 +119,10 @@ pub async fn run(opts: FixOpts) -> Result<()> {
     // 2. Load external strategies (--strategies flag, from semver-analyzer)
     //    These override rule-adjacent strategies for the same rule ID.
     if let Some(ref strategies_path) = opts.strategies {
-        eprintln!("Loading external strategies from {}", strategies_path.display());
+        eprintln!(
+            "Loading external strategies from {}",
+            strategies_path.display()
+        );
         match frontend_core::fix::load_strategies_from_json(strategies_path) {
             Ok(strats) => {
                 eprintln!("  Loaded {} external strategies", strats.len());
@@ -142,8 +140,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
 
     // Phase 1: Plan fixes
     eprintln!("Planning fixes...");
-    let mut plan =
-        fix_engine::plan_fixes(&output, &project, &merged_strategies)?;
+    let mut plan = fix_engine::plan_fixes(&output, &project, &merged_strategies)?;
 
     let pattern_fix_count: usize = plan
         .files
@@ -211,9 +208,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
                 );
 
                 if !opts.apply {
-                    eprintln!(
-                        "  (dry run — use --apply to let goose edit files directly)"
-                    );
+                    eprintln!("  (dry run — use --apply to let goose edit files directly)");
                     // In dry-run mode, just show what would be sent to goose
                     for req in &plan.pending_llm {
                         let file_name = req
@@ -237,7 +232,10 @@ pub async fn run(opts: FixOpts) -> Result<()> {
 
                     let succeeded = results.iter().filter(|r| r.success).count();
                     let failed = results.iter().filter(|r| !r.success).count();
-                    eprintln!("\n  Goose fixes: {} succeeded, {} failed", succeeded, failed);
+                    eprintln!(
+                        "\n  Goose fixes: {} succeeded, {} failed",
+                        succeeded, failed
+                    );
 
                     // Move failures to manual review
                     for (result, requests) in results.iter().zip(
@@ -269,9 +267,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
             }
             Some("openai") => {
                 let endpoint = opts.llm_endpoint.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--llm-endpoint is required when using --llm-provider=openai"
-                    )
+                    anyhow::anyhow!("--llm-endpoint is required when using --llm-provider=openai")
                 })?;
 
                 if !plan.pending_llm.is_empty() {
@@ -319,10 +315,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
                         }
                     }
 
-                    eprintln!(
-                        "  LLM generated {} fixes, {} errors",
-                        llm_fixes, llm_errors
-                    );
+                    eprintln!("  LLM generated {} fixes, {} errors", llm_fixes, llm_errors);
 
                     // Apply LLM-generated edits
                     if opts.apply && !plan.files.is_empty() {
@@ -332,10 +325,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
                 }
             }
             Some(other) => {
-                anyhow::bail!(
-                    "Unknown LLM provider '{}'. Use 'goose' or 'openai'.",
-                    other
-                );
+                anyhow::bail!("Unknown LLM provider '{}'. Use 'goose' or 'openai'.", other);
             }
             None => {
                 eprintln!(
@@ -369,7 +359,7 @@ pub async fn run(opts: FixOpts) -> Result<()> {
                     .strip_prefix("file://")
                     .unwrap_or(&item.file_uri)
                     .split('/')
-                    .last()
+                    .next_back()
                     .unwrap_or("?"),
                 item.line,
                 item.rule_id,

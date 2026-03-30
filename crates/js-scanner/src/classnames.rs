@@ -168,19 +168,17 @@ fn check_jsx_classnames(
             if let JSXAttributeName::Identifier(ident) = &a.name {
                 let attr_name = ident.name.as_str();
                 if attr_name == "className" || attr_name == "class" {
-                    if let Some(value) = &a.value {
-                        if let JSXAttributeValue::StringLiteral(s) = value {
-                            let text = s.value.as_str();
-                            if pattern.is_match(text) {
-                                let span = s.span();
-                                let mut incident =
-                                    make_incident(source, file_uri, span.start, span.end);
-                                incident.variables.insert(
-                                    "matchingText".into(),
-                                    serde_json::Value::String(text.to_string()),
-                                );
-                                incidents.push(incident);
-                            }
+                    if let Some(JSXAttributeValue::StringLiteral(s)) = &a.value {
+                        let text = s.value.as_str();
+                        if pattern.is_match(text) {
+                            let span = s.span();
+                            let mut incident =
+                                make_incident(source, file_uri, span.start, span.end);
+                            incident.variables.insert(
+                                "matchingText".into(),
+                                serde_json::Value::String(text.to_string()),
+                            );
+                            incidents.push(incident);
                         }
                     }
                 }

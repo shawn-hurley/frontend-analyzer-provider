@@ -1,16 +1,16 @@
 [workspace]
-members = ["crates/konveyor-core", "crates/core", "crates/js-scanner", "crates/css-scanner", "crates/grpc", "crates/fix-engine", "crates/patternfly-fix-context"]
+members = ["crates/core", "crates/js-scanner", "crates/css-scanner", "crates/grpc", "crates/fix-engine", "crates/patternfly-fix-context"]
 resolver = "2"
 
 [package]
 name = "frontend-analyzer-provider"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Konveyor external provider for JS/TS/JSX/TSX and CSS/SCSS analysis"
 license = "Apache-2.0"
 
 [dependencies]
-konveyor-core = { path = "crates/konveyor-core" }
+konveyor-core = "0.0.1"
 frontend-core = { path = "crates/core" }
 frontend-grpc = { path = "crates/grpc" }
 frontend-fix-engine = { path = "crates/fix-engine" }
@@ -25,7 +25,7 @@ clap = { version = "4", features = ["derive"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "=0.0.12"
+yaml_serde = "0.10"
 
 # Error handling
 anyhow = "1"

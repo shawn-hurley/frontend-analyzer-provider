@@ -29,9 +29,8 @@ impl ProviderCodeLocationService for FrontendProvider {
             .end_position
             .ok_or_else(|| Status::invalid_argument("no end position sent"))?;
 
-        let file_uri = Url::parse(&req.uri).map_err(|e| {
-            Status::invalid_argument(format!("invalid URI '{}': {}", req.uri, e))
-        })?;
+        let file_uri = Url::parse(&req.uri)
+            .map_err(|e| Status::invalid_argument(format!("invalid URI '{}': {}", req.uri, e)))?;
 
         let file_path = file_uri.to_file_path().map_err(|_| {
             Status::invalid_argument(format!("cannot convert URI to path: {}", req.uri))

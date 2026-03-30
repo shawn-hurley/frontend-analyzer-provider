@@ -1,12 +1,12 @@
 [package]
 name = "frontend-core"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Provider-specific types and fix engine domain types for frontend-analyzer-provider"
 
 [dependencies]
-konveyor-core = { path = "../konveyor-core" }
+konveyor-core = "0.0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "=0.0.12"
+yaml_serde = "0.10"
 anyhow = "1"

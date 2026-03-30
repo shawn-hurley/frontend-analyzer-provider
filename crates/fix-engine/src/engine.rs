@@ -176,7 +176,8 @@ pub fn apply_fixes(plan: &FixPlan) -> Result<FixResult> {
             dedup_import_specifiers(&mut lines);
 
             // Remove empty lines left by prop removal
-            lines.retain(|l| !l.is_empty() || true); // keep empty lines for now
+            // keep empty lines for now
+            lines.retain(|_l| true);
 
             // Preserve original trailing newline
             let mut output = lines.join("\n");
@@ -255,12 +256,12 @@ pub fn preview_fixes(plan: &FixPlan) -> Result<String> {
                 end - start
             ));
 
-            for i in start..end {
+            for (i, line) in lines.iter().enumerate().take(end).skip(start) {
                 if let Some(new_line) = changed_lines.get(&i) {
-                    output.push_str(&format!("-{}\n", lines[i]));
+                    output.push_str(&format!("-{}\n", line));
                     output.push_str(&format!("+{}\n", new_line));
                 } else {
-                    output.push_str(&format!(" {}\n", lines[i]));
+                    output.push_str(&format!(" {}\n", line));
                 }
             }
         }

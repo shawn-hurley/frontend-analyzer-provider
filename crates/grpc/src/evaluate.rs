@@ -164,9 +164,9 @@ fn incident_to_proto(incident: &Incident) -> IncidentContext {
 /// We extract the YAML under the capability key and return it as a standalone
 /// condition string.
 fn extract_nested_condition(capability: &str, condition_yaml: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_yml::from_str(condition_yaml).ok()?;
+    let parsed: serde_json::Value = yaml_serde::from_str(condition_yaml).ok()?;
     let nested = parsed.get(capability)?;
-    serde_yml::to_string(nested).ok()
+    yaml_serde::to_string(nested).ok()
 }
 
 fn json_to_prost_value(v: &serde_json::Value) -> prost_types::Value {
