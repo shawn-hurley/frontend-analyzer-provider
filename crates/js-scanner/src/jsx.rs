@@ -584,8 +584,8 @@ fn walk_jsx_expression(
             }
         }
         // Optional chaining: {items?.map(item => <Component />)}
-        JSXExpression::ChainExpression(chain) => match &chain.expression {
-            ChainElement::CallExpression(call) => {
+        JSXExpression::ChainExpression(chain) => {
+            if let ChainElement::CallExpression(call) = &chain.expression {
                 for arg in &call.arguments {
                     if let Argument::SpreadElement(spread) = arg {
                         walk_expression_for_jsx(
@@ -612,8 +612,7 @@ fn walk_jsx_expression(
                     }
                 }
             }
-            _ => {}
-        },
+        }
         _ => {}
     }
 }
