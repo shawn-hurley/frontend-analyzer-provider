@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "frontend-analyzer-provider"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Konveyor external provider for JS/TS/JSX/TSX and CSS/SCSS analysis"
 license = "Apache-2.0"
@@ -12,10 +12,10 @@ repository = "https://forge.hurley.page/shawn_hurley/frontend-analyzer-provider"
 
 [dependencies]
 konveyor-core = "0.0.1"
-frontend-core = { version = "0.0.1", path = "crates/core" }
-frontend-grpc = { version = "0.0.1", path = "crates/grpc" }
-frontend-fix-engine = { version = "0.0.1", path = "crates/fix-engine" }
-patternfly-fix-context = { version = "0.0.1", path = "crates/patternfly-fix-context" }
+frontend-core = { version = "0.0.2", path = "crates/core" }
+frontend-grpc = { version = "0.0.2", path = "crates/grpc" }
+frontend-fix-engine = { version = "0.0.2", path = "crates/fix-engine" }
+patternfly-fix-context = { version = "0.0.2", path = "crates/patternfly-fix-context" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

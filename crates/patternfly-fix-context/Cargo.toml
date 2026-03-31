@@ -1,10 +1,10 @@
 [package]
 name = "patternfly-fix-context"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "PatternFly v5-to-v6 migration context for the fix engine's LLM-assisted fixes"
 license = "Apache-2.0"
 repository = "https://forge.hurley.page/shawn_hurley/frontend-analyzer-provider"
 
 [dependencies]
-frontend-fix-engine = { version = "0.0.1", path = "../fix-engine" }
+frontend-fix-engine = { version = "0.0.2", path = "../fix-engine" }

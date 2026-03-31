@@ -1,6 +1,6 @@
 [package]
 name = "frontend-grpc"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Konveyor gRPC provider interface for frontend-analyzer-provider"
 license = "Apache-2.0"
@@ -10,9 +10,9 @@ repository = "https://forge.hurley.page/shawn_hurley/frontend-analyzer-provider"
 generate-proto = ["dep:tonic-build", "dep:dlprotoc"]
 
 [dependencies]
-frontend-core = { version = "0.0.1", path = "../core" }
-frontend-js-scanner = { version = "0.0.1", path = "../js-scanner" }
-frontend-css-scanner = { version = "0.0.1", path = "../css-scanner" }
+frontend-core = { version = "0.0.2", path = "../core" }
+frontend-js-scanner = { version = "0.0.2", path = "../js-scanner" }
+frontend-css-scanner = { version = "0.0.2", path = "../css-scanner" }
 
 # gRPC
 tonic = "0.13"

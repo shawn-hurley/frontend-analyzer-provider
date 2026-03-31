@@ -1,13 +1,13 @@
 [package]
 name = "frontend-js-scanner"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "OXC-based JS/TS/JSX/TSX analysis for frontend-analyzer-provider"
 license = "Apache-2.0"
 repository = "https://forge.hurley.page/shawn_hurley/frontend-analyzer-provider"
 
 [dependencies]
-frontend-core = { version = "0.0.1", path = "../core" }
+frontend-core = { version = "0.0.2", path = "../core" }
 
 # OXC - JavaScript/TypeScript toolchain
 oxc_parser = "0.116"
