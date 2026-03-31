@@ -4,6 +4,30 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to publish (e.g. v0.0.1)"
+        type: string
+        required: true
+      skip_preflight:
+        description: "Skip preflight checks (useful when retrying a failed publish)"
+        type: boolean
+        default: true
+      skip_version_bump:
+        description: "Skip version bump PR (if already created from a prior run)"
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      skip_preflight:
+        description: "Skip preflight checks (useful when retrying a failed publish)"
+        type: boolean
+        default: true
+      skip_version_bump:
+        description: "Skip version bump PR (if already created from a prior run)"
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,10 +35,13 @@ env:
 jobs:
   preflight:
     name: Pre-release checks
+    if: github.event_name != 'workflow_dispatch' || !inputs.skip_preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: https://github.com/actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust stable
         uses: https://github.com/dtolnay/rust-toolchain@stable
@@ -32,7 +59,8 @@ jobs:
 
       - name: Verify tag matches root Cargo.toml version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          REF_TAG="${{ inputs.tag || github.ref_name }}"
+          TAG="${REF_TAG#v}"
           CARGO_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
           if [ "$TAG" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version ($TAG) does not match Cargo.toml version ($CARGO_VERSION)"
@@ -55,16 +83,27 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: preflight
+    if: always() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: https://github.com/actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust stable
         uses: https://github.com/dtolnay/rust-toolchain@stable
 
       - name: Publish frontend-core
-        run: cargo publish --package frontend-core
+        run: |
+          output=$(cargo publish --package frontend-core 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-core already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -72,17 +111,41 @@ jobs:
         run: sleep 30
 
       - name: Publish frontend-js-scanner
-        run: cargo publish --package frontend-js-scanner
+        run: |
+          output=$(cargo publish --package frontend-js-scanner 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-js-scanner already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish frontend-css-scanner
-        run: cargo publish --package frontend-css-scanner
+        run: |
+          output=$(cargo publish --package frontend-css-scanner 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-css-scanner already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish frontend-fix-engine
-        run: cargo publish --package frontend-fix-engine
+        run: |
+          output=$(cargo publish --package frontend-fix-engine 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-fix-engine already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -90,12 +153,28 @@ jobs:
         run: sleep 30
 
       - name: Publish frontend-grpc
-        run: cargo publish --package frontend-grpc
+        run: |
+          output=$(cargo publish --package frontend-grpc 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-grpc already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish patternfly-fix-context
-        run: cargo publish --package patternfly-fix-context
+        run: |
+          output=$(cargo publish --package patternfly-fix-context 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "patternfly-fix-context already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -103,13 +182,22 @@ jobs:
         run: sleep 30
 
       - name: Publish frontend-analyzer-provider
-        run: cargo publish --package frontend-analyzer-provider
+        run: |
+          output=$(cargo publish --package frontend-analyzer-provider 2>&1) && echo "$output" || {
+            if echo "$output" | grep -q "already uploaded"; then
+              echo "frontend-analyzer-provider already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   version-bump:
     name: Bump version for next development cycle
     needs: publish
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.skip_version_bump)"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
