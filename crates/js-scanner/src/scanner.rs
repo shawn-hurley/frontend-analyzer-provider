@@ -188,11 +188,15 @@ pub fn scan_file_referenced(
     // Filter by import source path if specified.
     // Works for both import incidents (module from import statement) and
     // JSX incidents (module resolved from the file's import map).
-    if let Some(from_pattern) = &condition.from {
-        let from_re = Regex::new(from_pattern)?;
+    //
+    // Uses exact string matching, not regex. The `from` field is a package
+    // name (e.g., "@patternfly/react-core"), not a pattern. Exact matching
+    // prevents "@patternfly/react-core" from matching imports from
+    // "@patternfly/react-core/deprecated".
+    if let Some(from_value) = &condition.from {
         incidents.retain(|inc| {
             if let Some(serde_json::Value::String(module)) = inc.variables.get("module") {
-                from_re.is_match(module)
+                module == from_value
             } else {
                 // No module = component not found in imports (e.g., locally
                 // defined or HTML element). Keep it to avoid false negatives.
@@ -203,12 +207,11 @@ pub fn scan_file_referenced(
 
     // Filter by parent import source path if specified.
     // Matches the parent JSX component's import source, resolved from the
-    // file's import map (e.g., parentFrom: "@patternfly/react-core").
-    if let Some(parent_from_pattern) = &condition.parent_from {
-        let parent_from_re = Regex::new(parent_from_pattern)?;
+    // file's import map. Exact string match, same as `from` above.
+    if let Some(parent_from_value) = &condition.parent_from {
         incidents.retain(|inc| {
             if let Some(serde_json::Value::String(module)) = inc.variables.get("parentFrom") {
-                parent_from_re.is_match(module)
+                module == parent_from_value
             } else {
                 // No parentFrom = parent not found in imports, filter out
                 false
