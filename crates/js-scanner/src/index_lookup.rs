@@ -175,6 +175,37 @@ impl FileIndex {
         None
     }
 
+    /// Look up the object properties of an imported variable.
+    ///
+    /// Used for spread prop resolution: when `{...modalProps}` is encountered
+    /// and `modalProps` is imported, this looks up the variable's
+    /// `ReactDefData.object_properties` in the index.
+    ///
+    /// Returns `Some(properties)` if the symbol was found with non-empty
+    /// object properties, `None` otherwise (falls back to file-based resolution).
+    pub fn lookup_object_properties(
+        &self,
+        file_path: &Path,
+        local_name: &str,
+    ) -> Option<&[String]> {
+        let current_file = self.get(file_path)?;
+        let (original_name, target_path) =
+            self.find_import_for_name(current_file, local_name)?;
+
+        let target_file = self.get(&target_path)?;
+
+        for def in &target_file.symbol_defs {
+            if def.exported && def.name == original_name {
+                if !def.language_data.object_properties.is_empty() {
+                    return Some(&def.language_data.object_properties);
+                }
+                break;
+            }
+        }
+
+        None
+    }
+
     /// Find a file in the index that is part of a package and exports a given name.
     fn find_export_in_package(
         &self,

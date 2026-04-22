@@ -199,6 +199,7 @@ pub fn scan_file_referenced(
                 &transparent_components,
                 Some(resolver),
                 Some(file_path),
+                file_index,
             ));
         }
         _ => {}

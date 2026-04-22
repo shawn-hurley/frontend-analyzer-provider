@@ -85,6 +85,8 @@ struct ScanContext<'a, 'b> {
     /// (e.g., `renderA` → JSX → `renderB` → JSX → `renderA`) are detected
     /// and broken instead of causing a stack overflow.
     resolving_fns: HashSet<String>,
+    /// Optional pre-built file index for cross-file lookups without I/O.
+    file_index: Option<&'b crate::index_lookup::FileIndex>,
 }
 
 /// Build a map of all function declarations in the AST, including those
@@ -271,6 +273,7 @@ pub fn scan_jsx_file<'a>(
         transparent_components,
         None,
         None,
+        None,
     )
 }
 
@@ -293,6 +296,7 @@ pub fn scan_jsx_file_with_resolver<'a>(
     transparent_components: &HashMap<String, crate::transparency::WrapperInfo>,
     resolver: Option<&Resolver>,
     file_path: Option<&Path>,
+    file_index: Option<&crate::index_lookup::FileIndex>,
 ) -> Vec<Incident> {
     let local_exprs = build_local_expr_map(stmts, source);
     let mut incidents = Vec::new();
@@ -311,6 +315,7 @@ pub fn scan_jsx_file_with_resolver<'a>(
         resolver,
         file_path,
         resolving_fns: HashSet::new(),
+        file_index,
     };
     for stmt in stmts {
         walk_statement_for_jsx(stmt, &mut ctx, None);
@@ -345,6 +350,7 @@ pub fn scan_jsx(
         resolver: None,
         file_path: None,
         resolving_fns: HashSet::new(),
+        file_index: None,
     };
     walk_statement_for_jsx(stmt, &mut ctx, None);
     incidents
@@ -1455,6 +1461,8 @@ struct SpreadResolveCtx<'a, 'b> {
     import_map: &'b ImportMap,
     resolver: Option<&'b Resolver>,
     file_path: Option<&'b Path>,
+    /// Optional index for cross-file lookups without re-parsing.
+    file_index: Option<&'b crate::index_lookup::FileIndex>,
 }
 
 /// Extract property names from a spread expression.
@@ -1533,6 +1541,20 @@ fn collect_spread_props(
                 Some(m) => m.clone(),
                 None => return,
             };
+
+            // Try index-based lookup first (no I/O, pre-computed)
+            if let Some(file_index) = spread_ctx.file_index {
+                if let Some(file_path) = spread_ctx.file_path {
+                    if let Some(props) = file_index.lookup_object_properties(file_path, name) {
+                        for prop_name in props {
+                            results.push((prop_name.clone(), ident.span));
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Fallback: resolve via oxc_resolver and read from disk
             let (resolver, file_path) = match (spread_ctx.resolver, spread_ctx.file_path) {
                 (Some(r), Some(p)) => (r, p),
                 _ => return,
@@ -1967,6 +1989,7 @@ fn check_jsx_element(el: &JSXElement<'_>, ctx: &mut ScanContext, parent_name: Op
             import_map: ctx.import_map,
             resolver: ctx.resolver,
             file_path: ctx.file_path,
+            file_index: ctx.file_index,
         };
         for attr in &opening.attributes {
             if let JSXAttributeItem::SpreadAttribute(spread) = attr {
