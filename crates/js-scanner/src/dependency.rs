@@ -196,7 +196,31 @@ fn collect_direct_deps(
     deps
 }
 
+/// Directories to skip when scanning for nested workspace roots.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".cache",
+    ".next",
+    "coverage",
+    "__mocks__",
+];
+
 /// Find all package.json files to check: root + workspace members.
+///
+/// Supports two common monorepo layouts:
+///
+/// 1. **Root-level workspaces** — `root/package.json` has a `workspaces` field
+///    (e.g. `["packages/*"]`). Workspace member package.json files are expanded
+///    via glob.
+///
+/// 2. **Nested workspace roots** — `root/package.json` is a script-only
+///    orchestrator with no `workspaces` field, but a subdirectory like
+///    `frontend/package.json` declares its own workspaces. In this case we
+///    scan immediate child directories of `root` for package.json files that
+///    have a `workspaces` field and expand those too.
 pub fn find_package_jsons(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let root_pkg = root.join("package.json");
@@ -205,43 +229,36 @@ pub fn find_package_jsons(root: &Path) -> Vec<PathBuf> {
         return paths;
     }
 
-    // Check for workspaces field in root package.json
-    if let Ok(content) = std::fs::read_to_string(&root_pkg) {
-        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(workspaces) = pkg.get("workspaces") {
-                // workspaces can be an array of globs or an object with "packages" array
-                let workspace_globs = match workspaces {
-                    serde_json::Value::Array(arr) => arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>(),
-                    serde_json::Value::Object(obj) => obj
-                        .get("packages")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
+    // Try root-level workspace expansion first.
+    let root_has_workspaces = expand_workspaces(&root_pkg, &mut paths);
 
-                for glob_pattern in &workspace_globs {
-                    // Simple glob expansion: handle "client", "client/*", "packages/*"
-                    let pattern = root.join(glob_pattern).join("package.json");
-                    if let Ok(entries) = glob::glob(&pattern.to_string_lossy()) {
-                        for entry in entries.flatten() {
-                            if entry.exists() && entry != root_pkg {
-                                paths.push(entry);
-                            }
-                        }
-                    } else {
-                        // Fallback: try as a direct directory
-                        let direct = root.join(glob_pattern).join("package.json");
-                        if direct.exists() && direct != root_pkg {
-                            paths.push(direct);
-                        }
+    // If root had no workspaces, scan immediate child directories for nested
+    // workspace roots (e.g. frontend/package.json with its own workspaces).
+    if !root_has_workspaces {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if !child.is_dir() {
+                    continue;
+                }
+                let dir_name = child
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if SKIP_DIRS.contains(&dir_name.as_str()) {
+                    continue;
+                }
+
+                let child_pkg = child.join("package.json");
+                if child_pkg.exists() && child_pkg != root_pkg {
+                    // Expand this child's workspaces (if any)
+                    expand_workspaces(&child_pkg, &mut paths);
+
+                    // Always include the child package.json itself — it may
+                    // declare its own dependencies that need checking.
+                    if !paths.contains(&child_pkg) {
+                        paths.push(child_pkg);
                     }
                 }
             }
@@ -253,6 +270,66 @@ pub fn find_package_jsons(root: &Path) -> Vec<PathBuf> {
     paths.push(root_pkg);
 
     paths
+}
+
+/// Read the `workspaces` field from a `package.json` and expand its globs,
+/// adding each discovered workspace member `package.json` to `paths`.
+///
+/// Returns `true` if a `workspaces` field was present (even if it was empty).
+fn expand_workspaces(pkg_path: &Path, paths: &mut Vec<PathBuf>) -> bool {
+    let content = match std::fs::read_to_string(pkg_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let pkg: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let workspaces = match pkg.get("workspaces") {
+        Some(ws) => ws,
+        None => return false,
+    };
+
+    // workspaces can be an array of globs or an object with "packages" array
+    let workspace_globs = match workspaces {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<_>>(),
+        serde_json::Value::Object(obj) => obj
+            .get("packages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    // Resolve globs relative to the directory containing pkg_path.
+    let base_dir = pkg_path.parent().unwrap_or(Path::new("."));
+
+    for glob_pattern in &workspace_globs {
+        // Simple glob expansion: handle "client", "client/*", "packages/*"
+        let pattern = base_dir.join(glob_pattern).join("package.json");
+        if let Ok(entries) = glob::glob(&pattern.to_string_lossy()) {
+            for entry in entries.flatten() {
+                if entry.exists() && &entry != pkg_path && !paths.contains(&entry) {
+                    paths.push(entry);
+                }
+            }
+        } else {
+            // Fallback: try as a direct directory
+            let direct = base_dir.join(glob_pattern).join("package.json");
+            if direct.exists() && &direct != pkg_path && !paths.contains(&direct) {
+                paths.push(direct);
+            }
+        }
+    }
+
+    true
 }
 
 /// Check a single package.json for dependencies matching the condition.
@@ -729,6 +806,233 @@ __metadata:
             incidents.is_empty(),
             "Should not emit incidents for non-direct deps, got {}",
             incidents.len()
+        );
+    }
+
+    // ── Nested workspace discovery tests ─────────────────────────────
+
+    #[test]
+    fn test_find_package_jsons_nested_workspace_root() {
+        // Simulates the ACM console layout:
+        //   root/package.json          (no workspaces, script-only)
+        //   root/frontend/package.json (workspaces: ["packages/*"])
+        //   root/frontend/packages/sdk/package.json
+        //   root/backend/package.json  (no workspaces)
+        let dir = tempfile::tempdir().unwrap();
+
+        // Root: script-only orchestrator, no workspaces
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "root", "scripts": { "start": "echo hi" } }"#,
+        )
+        .unwrap();
+
+        // frontend/package.json with workspaces
+        let frontend = dir.path().join("frontend");
+        std::fs::create_dir_all(&frontend).unwrap();
+        std::fs::write(
+            frontend.join("package.json"),
+            r#"{ "name": "frontend", "workspaces": ["packages/*"] }"#,
+        )
+        .unwrap();
+
+        // frontend/packages/sdk/package.json — workspace member
+        let sdk = frontend.join("packages").join("sdk");
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::write(
+            sdk.join("package.json"),
+            r#"{ "name": "@org/sdk" }"#,
+        )
+        .unwrap();
+
+        // backend/package.json — no workspaces
+        let backend = dir.path().join("backend");
+        std::fs::create_dir_all(&backend).unwrap();
+        std::fs::write(
+            backend.join("package.json"),
+            r#"{ "name": "backend" }"#,
+        )
+        .unwrap();
+
+        let found = find_package_jsons(dir.path());
+
+        // Should discover: sdk, frontend, backend, root (order: workspace
+        // members first, then their parents, then root last)
+        assert!(
+            found.contains(&sdk.join("package.json")),
+            "Should discover workspace member sdk/package.json"
+        );
+        assert!(
+            found.contains(&frontend.join("package.json")),
+            "Should discover nested workspace root frontend/package.json"
+        );
+        assert!(
+            found.contains(&backend.join("package.json")),
+            "Should discover backend/package.json"
+        );
+        assert_eq!(
+            found.last().unwrap(),
+            &dir.path().join("package.json"),
+            "Root package.json should be last"
+        );
+    }
+
+    #[test]
+    fn test_find_package_jsons_root_with_workspaces_unchanged() {
+        // When root has workspaces, existing behaviour should be preserved
+        // and subdirectory scanning should NOT happen.
+        let dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "root", "workspaces": ["packages/*"] }"#,
+        )
+        .unwrap();
+
+        let pkg_a = dir.path().join("packages").join("a");
+        std::fs::create_dir_all(&pkg_a).unwrap();
+        std::fs::write(
+            pkg_a.join("package.json"),
+            r#"{ "name": "a" }"#,
+        )
+        .unwrap();
+
+        // A sibling directory that should NOT be scanned (root has workspaces)
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("package.json"),
+            r#"{ "name": "other" }"#,
+        )
+        .unwrap();
+
+        let found = find_package_jsons(dir.path());
+
+        assert!(
+            found.contains(&pkg_a.join("package.json")),
+            "Should discover workspace member packages/a/package.json"
+        );
+        assert!(
+            !found.contains(&other.join("package.json")),
+            "Should NOT discover other/package.json when root has workspaces"
+        );
+        assert_eq!(
+            found.last().unwrap(),
+            &dir.path().join("package.json"),
+            "Root package.json should be last"
+        );
+    }
+
+    #[test]
+    fn test_find_package_jsons_skips_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Root: no workspaces
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "root" }"#,
+        )
+        .unwrap();
+
+        // node_modules/some-pkg/package.json — must be skipped
+        let nm = dir.path().join("node_modules").join("some-pkg");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(
+            nm.join("package.json"),
+            r#"{ "name": "some-pkg" }"#,
+        )
+        .unwrap();
+
+        let found = find_package_jsons(dir.path());
+
+        assert!(
+            !found.contains(&nm.join("package.json")),
+            "Should NOT discover node_modules package.json"
+        );
+        assert_eq!(found.len(), 1, "Only root package.json should be found");
+    }
+
+    #[test]
+    fn test_check_dependencies_nested_workspace_root_with_v5_deps() {
+        // End-to-end: nested workspace root has PF v5 deps that should be
+        // detected by a dep-update rule with upperbound 5.99.99.
+        let dir = tempfile::tempdir().unwrap();
+
+        // Root: no workspaces, no PF deps
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "root", "scripts": {} }"#,
+        )
+        .unwrap();
+
+        // frontend/package.json: PF v5 deps + workspaces
+        let frontend = dir.path().join("frontend");
+        std::fs::create_dir_all(&frontend).unwrap();
+        std::fs::write(
+            frontend.join("package.json"),
+            r#"{
+  "name": "frontend",
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "@patternfly/react-core": "^5.4.10",
+    "@patternfly/react-icons": "^5.4.2"
+  }
+}"#,
+        )
+        .unwrap();
+
+        // frontend/packages/sdk/package.json: PF v6 deps (already migrated)
+        let sdk = frontend.join("packages").join("sdk");
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::write(
+            sdk.join("package.json"),
+            r#"{
+  "name": "@org/sdk",
+  "dependencies": {
+    "@patternfly/react-core": "^6.2.2"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let condition = DependencyCondition {
+            name: Some("@patternfly/react-core".into()),
+            nameregex: None,
+            upperbound: Some("5.99.99".into()),
+            lowerbound: None,
+        };
+
+        let incidents = check_dependencies(dir.path(), &condition).unwrap();
+
+        // Should find exactly 1 incident: frontend/package.json has ^5.4.10
+        // sdk has ^6.2.2 (above upperbound, no match)
+        // root has no PF deps (no match)
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Expected 1 incident for frontend v5 dep, got {}",
+            incidents.len()
+        );
+
+        let incident = &incidents[0];
+        assert!(
+            incident.file_uri.contains("frontend/package.json"),
+            "Incident should point to frontend/package.json, got: {}",
+            incident.file_uri
+        );
+        assert_eq!(
+            incident
+                .variables
+                .get("dependencyName")
+                .and_then(|v| v.as_str()),
+            Some("@patternfly/react-core")
+        );
+        assert_eq!(
+            incident
+                .variables
+                .get("dependencyVersion")
+                .and_then(|v| v.as_str()),
+            Some("^5.4.10")
         );
     }
 }
