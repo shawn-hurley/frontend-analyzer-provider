@@ -724,6 +724,30 @@ fn resolve_local_fn_reference(
         Some(m) => m.clone(),
         None => return,
     };
+
+    // Try index-based resolution first (no disk I/O)
+    if let Some(file_index) = ctx.file_index {
+        if let Some(file_path) = ctx.file_path {
+            if let Some(target_path) = file_index.resolve_import_to_path(file_path, name) {
+                if let Some(source_text) = file_index.get_source_text(&target_path) {
+                    if let (Some(resolver), _) = (ctx.resolver, ctx.file_path) {
+                        resolve_cross_file_fn(
+                            name,
+                            source_text,
+                            ctx,
+                            parent_name,
+                            resolver,
+                            &target_path,
+                            depth,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    // Fallback: resolve via oxc_resolver and read from disk
     let (resolver, file_path) = match (ctx.resolver, ctx.file_path) {
         (Some(r), Some(p)) => (r, p),
         _ => return,

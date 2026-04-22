@@ -206,6 +206,29 @@ impl FileIndex {
         None
     }
 
+    /// Get the cached source text for a file, if it's in the index.
+    ///
+    /// Used to avoid disk I/O when cross-file resolution needs to parse
+    /// an imported file. Returns the pre-loaded source text from when
+    /// the file was indexed.
+    pub fn get_source_text(&self, path: &Path) -> Option<&str> {
+        self.get(path).map(|f| f.source_text.as_str())
+    }
+
+    /// Resolve an imported name to a file path, returning the resolved path.
+    ///
+    /// Looks up the import in the current file's import declarations,
+    /// finds the target file in the index, and returns its absolute path.
+    pub fn resolve_import_to_path(
+        &self,
+        file_path: &Path,
+        local_name: &str,
+    ) -> Option<PathBuf> {
+        let current_file = self.get(file_path)?;
+        let (_original_name, target_path) = self.find_import_for_name(current_file, local_name)?;
+        Some(target_path)
+    }
+
     /// Find a file in the index that is part of a package and exports a given name.
     fn find_export_in_package(
         &self,
