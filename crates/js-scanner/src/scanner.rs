@@ -106,12 +106,17 @@ pub fn collect_files(root: &Path, file_pattern: Option<&str>) -> Result<Vec<Path
 /// `{children}` through, the scanner "sees through" it and assigns the
 /// grandparent as the effective parent. This prevents false positives on
 /// conformance rules that check parent nesting.
+///
+/// If `file_index` is provided (from the React project index), it will be
+/// used for transparency lookups instead of the resolver-based approach.
+/// This avoids re-parsing imported files for transparency analysis.
 pub fn scan_file_referenced(
     file_path: &Path,
     root: &Path,
     condition: &ReferencedCondition,
     resolver_map: &ResolverMap,
     transparency_cache: &mut TransparencyCache,
+    file_index: Option<&crate::index_lookup::FileIndex>,
 ) -> Result<(ScanResult, Option<ParseError>)> {
     let source = std::fs::read_to_string(file_path)?;
     let source_type = source_type_for_file(file_path, &source);
@@ -146,16 +151,23 @@ pub fn scan_file_referenced(
     let import_map = crate::imports::build_import_map(&ret.program);
 
     // Build the set of transparent (children-passthrough) components
-    // imported into this file. Uses cross-file resolution to parse
-    // locally-imported component source files and determine if they
-    // pass {children} through.
-    let transparent_components = build_transparency_set(
-        file_path,
-        &import_map,
-        root,
-        resolver_map,
-        transparency_cache,
-    );
+    // imported into this file.
+    //
+    // When a file index is available (from the React project index),
+    // transparency info is looked up directly from pre-computed data —
+    // no cross-file parsing needed. Otherwise, falls back to the
+    // resolver-based approach that parses imported component source files.
+    let transparent_components = if let Some(idx) = file_index {
+        idx.build_transparency_set(file_path, &import_map)
+    } else {
+        build_transparency_set(
+            file_path,
+            &import_map,
+            root,
+            resolver_map,
+            transparency_cache,
+        )
+    };
 
     // Compile optional child/notChild/requiresChild regexes for JSX child-matching rules.
     let child_re = condition.child.as_deref().map(Regex::new).transpose()?;
@@ -817,7 +829,7 @@ mod tests {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, parse_error) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // Should return no incidents (parser couldn't produce an AST)
         assert!(incidents.is_empty());
@@ -868,7 +880,7 @@ mod tests {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, parse_error) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // Valid file should have no parse error
         assert!(
@@ -916,7 +928,7 @@ mod tests {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&consumer_path, &dir, condition, &resolver_map, &mut cache)
+            scan_file_referenced(&consumer_path, &dir, condition, &resolver_map, &mut cache, None)
                 .unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1164,7 +1176,7 @@ const App = () => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache)
+            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache, None)
                 .unwrap();
 
         // Tbody should have parentName="Bullseye" (npm component stays opaque)
@@ -1232,7 +1244,7 @@ export const ConditionalTableBody = ({ isLoading, children }) => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // Tbody inside React.Fragment should NOT trigger — it's a render boundary
         assert!(
@@ -1294,7 +1306,7 @@ const App = () => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // Tbody inside Card should fire — Card is not Table
         assert!(
@@ -1350,7 +1362,7 @@ export function useToolbarActions() {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // ToolbarItem inside a hook is a render boundary — should NOT fire
         assert!(
@@ -1407,7 +1419,7 @@ export const ToolbarActions: React.FC = () => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         assert!(
             incidents.is_empty(),
@@ -1468,7 +1480,7 @@ export function useMyHook() {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache).unwrap();
+            scan_file_referenced(&file_path, &dir, &condition, &resolver_map, &mut cache, None).unwrap();
 
         // ToolbarItem inside Card (wrong parent) should still fire
         assert!(
@@ -1519,7 +1531,7 @@ export function useMyHook() {
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&consumer_path, &dir, condition, &resolver_map, &mut cache)
+            scan_file_referenced(&consumer_path, &dir, condition, &resolver_map, &mut cache, None)
                 .unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2021,7 +2033,7 @@ const App = () => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache)
+            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache, None)
                 .unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2102,7 +2114,7 @@ const App = () => (
         let resolver_map = crate::resolve::create_resolver_map(&dir, 3);
         let mut cache = crate::transparency::TransparencyCache::new();
         let (incidents, _) =
-            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache)
+            scan_file_referenced(&consumer_path, &dir, &condition, &resolver_map, &mut cache, None)
                 .unwrap();
 
         std::fs::remove_dir_all(&dir).ok();

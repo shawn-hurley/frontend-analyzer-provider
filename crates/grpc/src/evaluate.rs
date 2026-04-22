@@ -66,6 +66,14 @@ pub fn evaluate_condition(
             // files when multiple scan targets import the same wrappers.
             let mut transparency_cache =
                 frontend_js_scanner::transparency::TransparencyCache::new();
+
+            // When a React index is available, build a file lookup map for
+            // O(1) cross-file queries. This replaces ad-hoc file reading
+            // and parsing for transparency analysis.
+            let file_index = react_index
+                .map(frontend_js_scanner::index_lookup::FileIndex::new);
+            let file_index_ref = file_index.as_ref();
+
             for file in files {
                 let (incidents, parse_error) = frontend_js_scanner::scanner::scan_file_referenced(
                     &file,
@@ -73,6 +81,7 @@ pub fn evaluate_condition(
                     &cond,
                     &resolver_map,
                     &mut transparency_cache,
+                    file_index_ref,
                 )?;
                 all_incidents.extend(incidents);
                 if let Some(err) = parse_error {

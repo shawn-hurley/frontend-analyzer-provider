@@ -16,6 +16,11 @@ oxc_allocator = "0.116"
 oxc_span = "0.116"
 oxc_resolver = "11"
 
+# AST index for pre-computed cross-file data
+ast-index = { path = "../../../ast-index", features = ["serde"] }
+ast-index-react = { path = "../../../ast-index-languages/react" }
+ast-index-typescript = { path = "../../../ast-index-languages/typescript" }
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

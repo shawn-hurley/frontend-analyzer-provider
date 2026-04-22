@@ -860,6 +860,9 @@ name = "frontend-js-scanner"
 version = "0.0.4"
 dependencies = [
  "anyhow",
+ "ast-index",
+ "ast-index-react",
+ "ast-index-typescript",
  "frontend-core",
  "glob",
  "oxc_allocator 0.116.0",

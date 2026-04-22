@@ -3,6 +3,7 @@ pub mod css_vars;
 pub mod dependency;
 pub mod function_calls;
 pub mod imports;
+pub mod index_lookup;
 pub mod jsx;
 pub mod lockfile;
 pub mod resolve;
