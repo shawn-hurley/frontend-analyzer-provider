@@ -259,7 +259,26 @@ fn walk_expr(
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
                 if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                    // Check property keys for CSS class names used as
+                    // CSS-in-JS selectors (emotion, JSS, etc.).
+                    // e.g. css({ '& > .pf-v5-c-card__body': { padding: '0' } })
+                    if let PropertyKey::StringLiteral(s) = &p.key {
+                        let text = s.value.as_str();
+                        if pattern.is_match(text) {
+                            let span = s.span();
+                            let mut incident =
+                                make_incident(source, file_uri, span.start, span.end);
+                            incident.variables.insert(
+                                "matchingText".into(),
+                                serde_json::Value::String(text.to_string()),
+                            );
+                            incidents.push(incident);
+                        }
+                    }
                     walk_expr(&p.value, source, pattern, file_uri, incidents);
+                }
+                if let ObjectPropertyKind::SpreadProperty(spread) = prop {
+                    walk_expr(&spread.argument, source, pattern, file_uri, incidents);
                 }
             }
         }
@@ -842,6 +861,77 @@ mod tests {
             incidents.len(),
             1,
             "Should find pf-v5 in class component exported via HOC"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_css_in_js_object_key() {
+        // CSS-in-JS (emotion): class name used as object property key selector
+        // e.g. css({ '& > .pf-v5-c-card__body': { padding: '0 !important' } })
+        let source = r#"
+            const section = css({
+                '& > .pf-v5-c-card__body': {
+                    padding: '0 !important',
+                },
+            });
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in CSS-in-JS object key selector"
+        );
+        assert_eq!(
+            incidents[0].variables.get("matchingText").and_then(|v| v.as_str()),
+            Some("& > .pf-v5-c-card__body"),
+        );
+    }
+
+    #[test]
+    fn test_classname_in_direct_object_key() {
+        // Direct class selector as object key
+        let source = r#"
+            const styles = {
+                '.pf-v5-c-button': { color: 'red' },
+            };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in direct object key"
+        );
+    }
+
+    #[test]
+    fn test_classname_object_key_no_false_positive() {
+        // Non-class-name object keys should not match
+        let source = r#"
+            const config = {
+                'padding': '10px',
+                'margin-top': '5px',
+            };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            0,
+            "Should not find pf-v5 in non-class object keys"
+        );
+    }
+
+    #[test]
+    fn test_classname_object_spread_property() {
+        // Spread properties should be walked
+        let source = r#"
+            const base = "pf-v5-c-alert";
+            const styles = { ...{ key: base } };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in spread property value"
         );
     }
 }

@@ -5,6 +5,7 @@
 
 use crate::proto::{IncidentContext, Location, Position, ProviderEvaluateResponse};
 use anyhow::Result;
+use ast_index_react::types::ReactProjectIndex;
 use frontend_core::capabilities::ProviderCondition;
 use frontend_core::incident::Incident;
 use frontend_js_scanner::scanner::ParseError;
@@ -34,6 +35,7 @@ pub fn evaluate_condition(
     root: &Path,
     capability: &str,
     condition_yaml: &str,
+    react_index: Option<&ReactProjectIndex>,
 ) -> Result<EvaluationResult> {
     // Try to extract the nested condition from the kantra wrapper format.
     // The wrapper has the condition under a key matching the capability name.

@@ -2,6 +2,7 @@
 
 use crate::proto::provider_service_server::ProviderService;
 use crate::proto::*;
+use ast_index_react::types::ReactProjectIndex;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -13,6 +14,12 @@ use tonic::{Request, Response, Status};
 pub struct FrontendProvider {
     pub config: Arc<Mutex<Option<Config>>>,
     pub project_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Pre-built React/JSX project index for cross-file queries.
+    ///
+    /// Built once during `Init` and shared across all `Evaluate` calls.
+    /// Provides transparency info, JSX element spans/props, object
+    /// properties, and the full symbol/import graph without re-parsing.
+    pub react_index: Arc<Mutex<Option<ReactProjectIndex>>>,
     /// Number of context lines to include around code snippets.
     pub context_lines: usize,
 }
@@ -22,6 +29,7 @@ impl FrontendProvider {
         Self {
             config: Arc::new(Mutex::new(None)),
             project_root: Arc::new(Mutex::new(None)),
+            react_index: Arc::new(Mutex::new(None)),
             context_lines,
         }
     }
@@ -106,6 +114,25 @@ impl ProviderService for FrontendProvider {
             }
         }
 
+        // Build the React/JSX project index.
+        // This indexes all TS/JS/TSX/JSX files once, extracting:
+        // - Symbol definitions and references
+        // - Import graph (who imports what, resolved paths)
+        // - Component transparency (children passthrough detection)
+        // - JSX element spans and props
+        // - Object literal properties (for spread prop resolution)
+        tracing::info!("Building React project index for {}", root.display());
+        let analyzer = ast_index_react::analyzer::ReactAnalyzer::new(&root);
+        let index = ast_index::ProjectIndex::new(analyzer);
+        let stats = index.build(&root);
+        tracing::info!(
+            "React index built: {} files scanned, {} cached, {} failed, {} unresolved modules",
+            stats.files_scanned,
+            stats.files_cached,
+            stats.files_failed,
+            stats.unresolved_modules.len(),
+        );
+
         *self
             .config
             .lock()
@@ -114,6 +141,10 @@ impl ProviderService for FrontendProvider {
             .project_root
             .lock()
             .map_err(|_| Status::internal("Project root lock poisoned"))? = Some(root);
+        *self
+            .react_index
+            .lock()
+            .map_err(|_| Status::internal("React index lock poisoned"))? = Some(index);
 
         Ok(Response::new(InitResponse {
             error: String::new(),
@@ -135,12 +166,18 @@ impl ProviderService for FrontendProvider {
             .clone()
             .ok_or_else(|| Status::failed_precondition("Provider not initialized"))?;
 
+        let index_guard = self
+            .react_index
+            .lock()
+            .map_err(|_| Status::internal("React index lock poisoned"))?;
+        let index_ref = index_guard.as_ref();
+
         tracing::info!(
             "Evaluate request: cap={}, condition_info={}",
             &req.cap,
             &req.condition_info
         );
-        match crate::evaluate::evaluate_condition(&root, &req.cap, &req.condition_info) {
+        match crate::evaluate::evaluate_condition(&root, &req.cap, &req.condition_info, index_ref) {
             Ok(result) => {
                 // Build an error summary if any files could not be parsed.
                 let error = if result.parse_errors.is_empty() {

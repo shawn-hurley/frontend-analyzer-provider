@@ -14,6 +14,10 @@ frontend-core = { version = "0.0.4", path = "../core" }
 frontend-js-scanner = { version = "0.0.4", path = "../js-scanner" }
 frontend-css-scanner = { version = "0.0.4", path = "../css-scanner" }
 
+# AST index for cross-file symbol tracking and React-specific analysis
+ast-index = { path = "../../../ast-index", features = ["serde"] }
+ast-index-react = { path = "../../../ast-index-languages/react" }
+
 # gRPC
 tonic = "0.13"
 prost = "0.13"
