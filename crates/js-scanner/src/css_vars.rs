@@ -82,12 +82,35 @@ fn walk_stmt(
             }
         }
         Statement::IfStatement(if_stmt) => {
+            walk_expr(&if_stmt.test, source, pattern, file_uri, incidents);
             walk_stmt(&if_stmt.consequent, source, pattern, file_uri, incidents);
             if let Some(alt) = &if_stmt.alternate {
                 walk_stmt(alt, source, pattern, file_uri, incidents);
             }
         }
         Statement::ForStatement(f) => {
+            if let Some(init) = &f.init {
+                match init {
+                    ForStatementInit::VariableDeclaration(v) => {
+                        for d in &v.declarations {
+                            if let Some(expr) = &d.init {
+                                walk_expr(expr, source, pattern, file_uri, incidents);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(expr) = init.as_expression() {
+                            walk_expr(expr, source, pattern, file_uri, incidents);
+                        }
+                    }
+                }
+            }
+            if let Some(test) = &f.test {
+                walk_expr(test, source, pattern, file_uri, incidents);
+            }
+            if let Some(update) = &f.update {
+                walk_expr(update, source, pattern, file_uri, incidents);
+            }
             walk_stmt(&f.body, source, pattern, file_uri, incidents);
         }
         Statement::ForInStatement(f) => {
@@ -97,13 +120,19 @@ fn walk_stmt(
             walk_stmt(&f.body, source, pattern, file_uri, incidents);
         }
         Statement::WhileStatement(w) => {
+            walk_expr(&w.test, source, pattern, file_uri, incidents);
             walk_stmt(&w.body, source, pattern, file_uri, incidents);
         }
         Statement::DoWhileStatement(d) => {
+            walk_expr(&d.test, source, pattern, file_uri, incidents);
             walk_stmt(&d.body, source, pattern, file_uri, incidents);
         }
         Statement::SwitchStatement(s) => {
+            walk_expr(&s.discriminant, source, pattern, file_uri, incidents);
             for case in &s.cases {
+                if let Some(test) = &case.test {
+                    walk_expr(test, source, pattern, file_uri, incidents);
+                }
                 for stmt in &case.consequent {
                     walk_stmt(stmt, source, pattern, file_uri, incidents);
                 }
@@ -177,6 +206,8 @@ fn walk_expr(
             }
         }
         Expression::CallExpression(call) => {
+            // Walk the callee — needed for IIFEs: (() => { ... })()
+            walk_expr(&call.callee, source, pattern, file_uri, incidents);
             for arg in &call.arguments {
                 if let Some(e) = arg.as_expression() {
                     walk_expr(e, source, pattern, file_uri, incidents);
@@ -192,6 +223,7 @@ fn walk_expr(
             }
         }
         Expression::ConditionalExpression(c) => {
+            walk_expr(&c.test, source, pattern, file_uri, incidents);
             walk_expr(&c.consequent, source, pattern, file_uri, incidents);
             walk_expr(&c.alternate, source, pattern, file_uri, incidents);
         }
@@ -757,6 +789,56 @@ mod tests {
             incidents.len(),
             1,
             "Should find CSS var inside labeled statement"
+        );
+    }
+
+    // -- condition/test expression walking tests --
+
+    #[test]
+    fn test_css_var_in_if_condition() {
+        let source = r#"
+            function check() {
+                if (el.style.getPropertyValue('--pf-v5-c-button--Color')) {
+                    doSomething();
+                }
+            }
+        "#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var in if condition"
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_ternary_condition() {
+        let source = r#"
+            const color = el.style.getPropertyValue('--pf-v5-c-button--Color')
+                ? 'blue'
+                : 'red';
+        "#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var in ternary condition"
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_iife() {
+        // IIFE: (() => { ... })()
+        let source = r#"
+            const el = (() => {
+                return <div style={{ marginTop: 'var(--pf-v5-global--spacer--sm)' }} />;
+            })();
+        "#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var inside IIFE"
         );
     }
 }

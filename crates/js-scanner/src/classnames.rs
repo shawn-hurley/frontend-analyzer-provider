@@ -82,12 +82,35 @@ fn walk_statement(
             }
         }
         Statement::IfStatement(if_stmt) => {
+            walk_expr(&if_stmt.test, source, pattern, file_uri, incidents);
             walk_statement(&if_stmt.consequent, source, pattern, file_uri, incidents);
             if let Some(alt) = &if_stmt.alternate {
                 walk_statement(alt, source, pattern, file_uri, incidents);
             }
         }
         Statement::ForStatement(f) => {
+            if let Some(init) = &f.init {
+                match init {
+                    ForStatementInit::VariableDeclaration(v) => {
+                        for d in &v.declarations {
+                            if let Some(expr) = &d.init {
+                                walk_expr(expr, source, pattern, file_uri, incidents);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(expr) = init.as_expression() {
+                            walk_expr(expr, source, pattern, file_uri, incidents);
+                        }
+                    }
+                }
+            }
+            if let Some(test) = &f.test {
+                walk_expr(test, source, pattern, file_uri, incidents);
+            }
+            if let Some(update) = &f.update {
+                walk_expr(update, source, pattern, file_uri, incidents);
+            }
             walk_statement(&f.body, source, pattern, file_uri, incidents);
         }
         Statement::ForInStatement(f) => {
@@ -97,13 +120,19 @@ fn walk_statement(
             walk_statement(&f.body, source, pattern, file_uri, incidents);
         }
         Statement::WhileStatement(w) => {
+            walk_expr(&w.test, source, pattern, file_uri, incidents);
             walk_statement(&w.body, source, pattern, file_uri, incidents);
         }
         Statement::DoWhileStatement(d) => {
+            walk_expr(&d.test, source, pattern, file_uri, incidents);
             walk_statement(&d.body, source, pattern, file_uri, incidents);
         }
         Statement::SwitchStatement(s) => {
+            walk_expr(&s.discriminant, source, pattern, file_uri, incidents);
             for case in &s.cases {
+                if let Some(test) = &case.test {
+                    walk_expr(test, source, pattern, file_uri, incidents);
+                }
                 for stmt in &case.consequent {
                     walk_statement(stmt, source, pattern, file_uri, incidents);
                 }
@@ -237,6 +266,7 @@ fn walk_expr(
             walk_expr(&p.expression, source, pattern, file_uri, incidents);
         }
         Expression::ConditionalExpression(c) => {
+            walk_expr(&c.test, source, pattern, file_uri, incidents);
             walk_expr(&c.consequent, source, pattern, file_uri, incidents);
             walk_expr(&c.alternate, source, pattern, file_uri, incidents);
         }
@@ -246,6 +276,8 @@ fn walk_expr(
             }
         }
         Expression::CallExpression(call) => {
+            // Walk the callee — needed for IIFEs: (() => { ... })()
+            walk_expr(&call.callee, source, pattern, file_uri, incidents);
             for arg in &call.arguments {
                 if let Some(e) = arg.as_expression() {
                     walk_expr(e, source, pattern, file_uri, incidents);
@@ -842,6 +874,163 @@ mod tests {
             incidents.len(),
             1,
             "Should find pf-v5 in class component exported via HOC"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_css_in_js_object_key() {
+        // CSS-in-JS (emotion): class name used as object property key selector
+        // e.g. css({ '& > .pf-v5-c-card__body': { padding: '0 !important' } })
+        let source = r#"
+            const section = css({
+                '& > .pf-v5-c-card__body': {
+                    padding: '0 !important',
+                },
+            });
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in CSS-in-JS object key selector"
+        );
+        assert_eq!(
+            incidents[0].variables.get("matchingText").and_then(|v| v.as_str()),
+            Some("& > .pf-v5-c-card__body"),
+        );
+    }
+
+    #[test]
+    fn test_classname_in_direct_object_key() {
+        // Direct class selector as object key
+        let source = r#"
+            const styles = {
+                '.pf-v5-c-button': { color: 'red' },
+            };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in direct object key"
+        );
+    }
+
+    #[test]
+    fn test_classname_object_key_no_false_positive() {
+        // Non-class-name object keys should not match
+        let source = r#"
+            const config = {
+                'padding': '10px',
+                'margin-top': '5px',
+            };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            0,
+            "Should not find pf-v5 in non-class object keys"
+        );
+    }
+
+    #[test]
+    fn test_classname_object_spread_property() {
+        // Spread properties should be walked
+        let source = r#"
+            const base = "pf-v5-c-alert";
+            const styles = { ...{ key: base } };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in spread property value"
+        );
+    }
+
+    // -- condition/test expression walking tests --
+
+    #[test]
+    fn test_classname_in_if_condition() {
+        // Mirrors theme.tsx: if (el.classList.contains('pf-v5-theme-dark'))
+        let source = r#"
+            function toggle() {
+                if (document.documentElement.classList.contains('pf-v5-theme-dark')) {
+                    setLight(true);
+                }
+            }
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in if condition"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_ternary_condition() {
+        // Mirrors theme.ts: !x.contains('pf-v5-theme-dark') ? 'a' : 'b'
+        let source = r#"
+            const result = !document.documentElement.classList.contains('pf-v5-theme-dark')
+                ? 'console-light'
+                : 'console-dark';
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in ternary condition"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_while_condition() {
+        let source = r#"
+            function process() {
+                while (el.classList.contains('pf-v5-c-spinner')) {
+                    doWork();
+                }
+            }
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in while condition"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_switch_discriminant() {
+        let source = r#"
+            function check() {
+                switch (getClass('pf-v5-c-button')) {
+                    case 'a': break;
+                }
+            }
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in switch discriminant"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_iife() {
+        // IIFE pattern: (() => { ... })()
+        let source = r#"
+            const el = (() => {
+                return <div className="pf-v5-c-button">click</div>;
+            })();
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 inside IIFE"
         );
     }
 }
