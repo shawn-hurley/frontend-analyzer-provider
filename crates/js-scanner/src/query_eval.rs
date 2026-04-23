@@ -390,10 +390,101 @@ fn eval_jsx_prop(
                     }
                 }
             }
+
+            // ── Typed local objects inside function defs ─────────
+            // Detect `const x: ToolbarItemProps = { align: ... }` inside
+            // function bodies (hooks, components, helpers).
+            if component_re.is_some() {
+                for def in &file.symbol_defs {
+                    for typed_obj in &def.language_data.typed_local_objects {
+                        let type_name =
+                            extract_props_type_name_from_raw(&typed_obj.type_name);
+                        let type_name = match type_name {
+                            Some(n) => n,
+                            None => continue,
+                        };
+                        let comp_name = match type_name.strip_suffix("Props") {
+                            Some(n) => n,
+                            None => continue,
+                        };
+                        if let Some(ref comp_re) = component_re {
+                            if !comp_re.is_match(comp_name) {
+                                continue;
+                            }
+                        }
+                        for prop_name in &typed_obj.properties {
+                            if !pattern_re.is_match(prop_name) {
+                                continue;
+                            }
+                            let mut inc = make_incident_from_span(
+                                root,
+                                &file.path,
+                                &file.source_text,
+                                typed_obj.span,
+                            );
+                            inc.variables.insert(
+                                "propName".into(),
+                                serde_json::Value::String(prop_name.clone()),
+                            );
+                            inc.variables.insert(
+                                "componentName".into(),
+                                serde_json::Value::String(comp_name.to_string()),
+                            );
+                            inc.variables.insert(
+                                "typedObjectLiteral".into(),
+                                serde_json::Value::String("true".to_string()),
+                            );
+                            if let Some(module) = find_import_module(file, &type_name) {
+                                inc.variables.insert(
+                                    "module".into(),
+                                    serde_json::Value::String(module),
+                                );
+                            }
+                            incidents.push(inc);
+                        }
+                    }
+                }
+            }
         }
     }
 
     Ok(incidents)
+}
+
+/// Extract the inner Props type name from a raw type annotation string.
+///
+/// Handles:
+/// - `"ToolbarItemProps"` → `Some("ToolbarItemProps")`
+/// - `"Partial<ToolbarItemProps>"` → `Some("ToolbarItemProps")`
+/// - `"Omit<ToolbarItemProps, 'key'>"` → `Some("ToolbarItemProps")`
+/// - `"string"` → `None`
+fn extract_props_type_name_from_raw(raw: &str) -> Option<String> {
+    // Direct: ends with "Props"
+    if raw.ends_with("Props") && !raw.contains('<') {
+        return Some(raw.to_string());
+    }
+
+    // Wrapper: `Partial<ToolbarItemProps>`, `Omit<ToolbarItemProps, "key">`
+    if let Some(inner_start) = raw.find('<') {
+        let wrapper = &raw[..inner_start];
+        if matches!(wrapper, "Partial" | "Required" | "Readonly" | "Omit" | "Pick") {
+            // Extract the first type argument
+            let inner = &raw[inner_start + 1..];
+            // Find the end of the first type arg (before ',' or '>')
+            let end = inner.find(|c| c == ',' || c == '>').unwrap_or(inner.len());
+            let first_arg = inner[..end].trim();
+            if first_arg.ends_with("Props") {
+                return Some(first_arg.to_string());
+            }
+        }
+    }
+
+    // Direct check without generics
+    if raw.ends_with("Props") {
+        return Some(raw.to_string());
+    }
+
+    None
 }
 
 /// Extract the inner Props type name from a type annotation, handling
@@ -3063,5 +3154,183 @@ const App = () => <Button>Click</Button>;
         let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
         // Should find at least the import and the JSX usage
         assert!(incidents.len() >= 2, "No-location should match both import and JSX usage");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // JSX inside prop value expressions
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_jsx_prop_inside_prop_value_arrow() {
+        // Real-world pattern: <Dropdown toggle={toggleRef => <MenuToggle splitButtonOptions={...}>}>
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { Dropdown, MenuToggle } from '@patternfly/react-core';
+const App = () => (
+    <Dropdown
+        isOpen={false}
+        toggle={toggleRef => (
+            <MenuToggle ref={toggleRef} splitButtonOptions={{ items: [] }}>
+                Toggle
+            </MenuToggle>
+        )}
+    >
+        <div>content</div>
+    </Dropdown>
+);
+"#,
+        )]);
+        let mut c = cond("^splitButtonOptions$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^MenuToggle$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find splitButtonOptions on MenuToggle inside prop value arrow"
+        );
+    }
+
+    #[test]
+    fn query_jsx_component_inside_prop_value() {
+        // JSX component rendered inside a prop expression
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { Modal, ModalHeader } from '@patternfly/react-core';
+const App = () => (
+    <Modal header={<ModalHeader title="Hello" />}>
+        <p>content</p>
+    </Modal>
+);
+"#,
+        )]);
+        let c = cond("^ModalHeader$", Some(ReferenceLocation::JsxComponent));
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find ModalHeader inside prop value expression"
+        );
+    }
+
+    #[test]
+    fn query_jsx_prop_inside_render_prop() {
+        // renderItem pattern
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { Select, SelectOption } from '@patternfly/react-core';
+const App = () => (
+    <Select
+        isOpen={false}
+        renderItem={item => <SelectOption value={item} isDisabled={false}>{item}</SelectOption>}
+    >
+        <div>content</div>
+    </Select>
+);
+"#,
+        )]);
+        let mut c = cond("^isDisabled$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^SelectOption$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find isDisabled on SelectOption inside renderItem prop"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Typed local objects inside function bodies
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_typed_local_object_inside_arrow() {
+        // Real-world pattern: hook returns typed props object
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarItemProps } from '@patternfly/react-core';
+export const usePaginationPropHelpers = () => {
+    const paginationToolbarItemProps: ToolbarItemProps = {
+        variant: 'pagination',
+        align: { default: 'alignRight' }
+    };
+    return { paginationToolbarItemProps };
+};
+"#,
+        )]);
+        let mut c = cond("^align$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarItem$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find align in function-local typed object literal"
+        );
+    }
+
+    #[test]
+    fn query_typed_local_object_inside_function_decl() {
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarItemProps } from '@patternfly/react-core';
+function buildToolbarProps() {
+    const itemProps: ToolbarItemProps = {
+        variant: 'pagination',
+        align: { default: 'alignRight' }
+    };
+    return itemProps;
+}
+"#,
+        )]);
+        let mut c = cond("^align$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarItem$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find align in function-local typed object literal (function decl)"
+        );
+    }
+
+    #[test]
+    fn query_typed_local_object_partial() {
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarItemProps } from '@patternfly/react-core';
+const useProps = () => {
+    const props: Partial<ToolbarItemProps> = { align: { default: 'alignRight' } };
+    return props;
+};
+"#,
+        )]);
+        let mut c = cond("^align$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarItem$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should find align in Partial<ToolbarItemProps> typed local"
+        );
+    }
+
+    #[test]
+    fn query_typed_local_object_no_false_positive() {
+        // Type annotation doesn't end in "Props" - should not match
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+interface Config { align: string }
+const useProps = () => {
+    const config: Config = { align: 'right' };
+    return config;
+};
+"#,
+        )]);
+        let mut c = cond("^align$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarItem$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 0,
+            "Non-Props type should not produce incidents"
+        );
     }
 }
