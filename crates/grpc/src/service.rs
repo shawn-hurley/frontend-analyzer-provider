@@ -581,8 +581,54 @@ impl ProviderService for FrontendProvider {
 
     async fn notify_file_changes(
         &self,
-        _request: Request<NotifyFileChangesRequest>,
+        request: Request<NotifyFileChangesRequest>,
     ) -> Result<Response<NotifyFileChangesResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.changes.is_empty() {
+            return Ok(Response::new(NotifyFileChangesResponse {
+                error: String::new(),
+            }));
+        }
+
+        // Check if any changed files are JS/TS/JSX/TSX that would affect the index
+        let js_extensions = ["ts", "tsx", "js", "jsx", "mjs", "mts"];
+        let has_js_changes = req.changes.iter().any(|change| {
+            let uri = &change.uri;
+            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            js_extensions
+                .iter()
+                .any(|ext| path.ends_with(&format!(".{}", ext)))
+        });
+
+        if has_js_changes {
+            let root = self
+                .project_root
+                .lock()
+                .map_err(|_| Status::internal("Project root lock poisoned"))?
+                .clone();
+
+            if let Some(root) = root {
+                tracing::info!(
+                    "Rebuilding React index after {} file change(s)",
+                    req.changes.len()
+                );
+                let analyzer = ast_index_react::analyzer::ReactAnalyzer::new(&root);
+                let index = ast_index::ProjectIndex::new(analyzer);
+                let stats = index.build(&root);
+                tracing::info!(
+                    "React index rebuilt: {} files cached, {} failed",
+                    stats.files_cached,
+                    stats.files_failed,
+                );
+
+                *self
+                    .react_index
+                    .lock()
+                    .map_err(|_| Status::internal("React index lock poisoned"))? = Some(index);
+            }
+        }
+
         Ok(Response::new(NotifyFileChangesResponse {
             error: String::new(),
         }))
