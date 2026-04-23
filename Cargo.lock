@@ -870,6 +870,7 @@ dependencies = [
  "oxc_parser 0.116.0",
  "oxc_resolver",
  "oxc_span 0.116.0",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

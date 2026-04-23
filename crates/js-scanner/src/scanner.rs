@@ -377,6 +377,56 @@ pub fn scan_file_referenced(
     Ok((incidents, None))
 }
 
+/// Scan multiple files in parallel using rayon, with index-based cross-file lookups.
+///
+/// This is the parallel version of the file scanning loop. It requires a
+/// `FileIndex` (no mutable transparency cache needed since all cross-file
+/// data comes from the pre-built index).
+///
+/// Returns all incidents and parse errors collected across all files.
+pub fn scan_files_parallel(
+    files: &[PathBuf],
+    root: &Path,
+    condition: &ReferencedCondition,
+    resolver_map: &ResolverMap,
+    file_index: &crate::index_lookup::FileIndex,
+) -> Result<(Vec<Incident>, Vec<ParseError>)> {
+    use rayon::prelude::*;
+
+    let results: Vec<Result<(ScanResult, Option<ParseError>)>> = files
+        .par_iter()
+        .map(|file| {
+            // Each thread gets its own empty transparency cache (never mutated
+            // because the index path is always taken when file_index is Some).
+            let mut dummy_cache = TransparencyCache::new();
+            scan_file_referenced(
+                file,
+                root,
+                condition,
+                resolver_map,
+                &mut dummy_cache,
+                Some(file_index),
+            )
+        })
+        .collect();
+
+    let mut all_incidents = Vec::new();
+    let mut parse_errors = Vec::new();
+    let mut errored_files = std::collections::HashSet::new();
+
+    for result in results {
+        let (incidents, parse_error) = result?;
+        all_incidents.extend(incidents);
+        if let Some(err) = parse_error {
+            if errored_files.insert(err.file_path.clone()) {
+                parse_errors.push(err);
+            }
+        }
+    }
+
+    Ok((all_incidents, parse_errors))
+}
+
 /// Build the set of transparent component names for a given file, along with
 /// what component each transparent wrapper wraps `{children}` in.
 ///

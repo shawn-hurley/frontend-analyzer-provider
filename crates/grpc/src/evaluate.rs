@@ -55,38 +55,46 @@ pub fn evaluate_condition(
                 frontend_js_scanner::scanner::collect_files(root, cond.file_pattern.as_deref())?;
 
             // Create a resolver map once for the entire rule evaluation.
-            // This discovers all tsconfig.json files in the project tree
-            // (e.g., client/tsconfig.json, common/tsconfig.json) and creates
-            // one resolver per tsconfig. Each file is routed to the correct
-            // resolver based on which tsconfig directory is its ancestor.
             let resolver_map = frontend_js_scanner::resolve::create_resolver_map(root, 3);
 
-            // Transparency cache: shared across all file scans within this
-            // rule evaluation. Avoids re-parsing the same imported component
-            // files when multiple scan targets import the same wrappers.
-            let mut transparency_cache =
-                frontend_js_scanner::transparency::TransparencyCache::new();
-
-            // When a React index is available, build a file lookup map for
-            // O(1) cross-file queries. This replaces ad-hoc file reading
-            // and parsing for transparency analysis.
-            let file_index = react_index
-                .map(frontend_js_scanner::index_lookup::FileIndex::new);
-            let file_index_ref = file_index.as_ref();
-
-            for file in files {
-                let (incidents, parse_error) = frontend_js_scanner::scanner::scan_file_referenced(
-                    &file,
-                    root,
-                    &cond,
-                    &resolver_map,
-                    &mut transparency_cache,
-                    file_index_ref,
-                )?;
+            if let Some(react_idx) = react_index {
+                // Fast path: use the React project index for parallel scanning.
+                // All cross-file data comes from the pre-built index, so no
+                // mutable state is needed — files can be scanned concurrently.
+                let file_index = frontend_js_scanner::index_lookup::FileIndex::new(react_idx);
+                let (incidents, errors) =
+                    frontend_js_scanner::scanner::scan_files_parallel(
+                        &files,
+                        root,
+                        &cond,
+                        &resolver_map,
+                        &file_index,
+                    )?;
                 all_incidents.extend(incidents);
-                if let Some(err) = parse_error {
+                for err in errors {
                     if errored_files.insert(err.file_path.clone()) {
                         parse_errors.push(err);
+                    }
+                }
+            } else {
+                // Fallback: sequential scanning with mutable transparency cache.
+                let mut transparency_cache =
+                    frontend_js_scanner::transparency::TransparencyCache::new();
+                for file in files {
+                    let (incidents, parse_error) =
+                        frontend_js_scanner::scanner::scan_file_referenced(
+                            &file,
+                            root,
+                            &cond,
+                            &resolver_map,
+                            &mut transparency_cache,
+                            None,
+                        )?;
+                    all_incidents.extend(incidents);
+                    if let Some(err) = parse_error {
+                        if errored_files.insert(err.file_path.clone()) {
+                            parse_errors.push(err);
+                        }
                     }
                 }
             }
