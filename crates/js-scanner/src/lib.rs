@@ -1,12 +1,6 @@
 pub mod classnames;
 pub mod css_vars;
 pub mod dependency;
-pub mod function_calls;
-pub mod imports;
-pub mod index_lookup;
-pub mod jsx;
 pub mod lockfile;
-pub mod resolve;
+pub mod query_eval;
 pub mod scanner;
-pub mod transparency;
-pub mod type_refs;

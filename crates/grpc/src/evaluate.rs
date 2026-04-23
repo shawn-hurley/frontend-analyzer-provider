@@ -51,53 +51,16 @@ pub fn evaluate_condition(
 
     match condition {
         ProviderCondition::Referenced(cond) => {
-            let files =
-                frontend_js_scanner::scanner::collect_files(root, cond.file_pattern.as_deref())?;
-
-            // Create a resolver map once for the entire rule evaluation.
-            let resolver_map = frontend_js_scanner::resolve::create_resolver_map(root, 3);
-
-            if let Some(react_idx) = react_index {
-                // Fast path: use the React project index for parallel scanning.
-                // All cross-file data comes from the pre-built index, so no
-                // mutable state is needed — files can be scanned concurrently.
-                let file_index = frontend_js_scanner::index_lookup::FileIndex::new(react_idx);
-                let (incidents, errors) =
-                    frontend_js_scanner::scanner::scan_files_parallel(
-                        &files,
-                        root,
-                        &cond,
-                        &resolver_map,
-                        &file_index,
-                    )?;
-                all_incidents.extend(incidents);
-                for err in errors {
-                    if errored_files.insert(err.file_path.clone()) {
-                        parse_errors.push(err);
-                    }
-                }
-            } else {
-                // Fallback: sequential scanning with mutable transparency cache.
-                let mut transparency_cache =
-                    frontend_js_scanner::transparency::TransparencyCache::new();
-                for file in files {
-                    let (incidents, parse_error) =
-                        frontend_js_scanner::scanner::scan_file_referenced(
-                            &file,
-                            root,
-                            &cond,
-                            &resolver_map,
-                            &mut transparency_cache,
-                            None,
-                        )?;
-                    all_incidents.extend(incidents);
-                    if let Some(err) = parse_error {
-                        if errored_files.insert(err.file_path.clone()) {
-                            parse_errors.push(err);
-                        }
-                    }
-                }
-            }
+            let react_idx = react_index.ok_or_else(|| {
+                anyhow::anyhow!("ReactProjectIndex is required for referenced conditions")
+            })?;
+            // Query-based evaluation: translate the condition into index
+            // queries. No file re-parsing, no AST walking — all data
+            // comes from the pre-built ReactProjectIndex.
+            let incidents = frontend_js_scanner::query_eval::evaluate_referenced(
+                &cond, react_idx, root,
+            )?;
+            all_incidents.extend(incidents);
         }
         ProviderCondition::CssClass(cond) => {
             let pattern = Regex::new(&cond.pattern)?;
