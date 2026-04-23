@@ -263,12 +263,23 @@ fn eval_jsx_prop(
 
                     // Check value filter.
                     if let Some(ref val_re) = value_re {
-                        let prop_value = prop
+                        // First try direct string or expression text match.
+                        let direct_value = prop
                             .string_value
                             .as_deref()
                             .or(prop.expression_text.as_deref())
                             .unwrap_or("");
-                        if !val_re.is_match(prop_value) {
+                        let direct_match = val_re.is_match(direct_value);
+
+                        // For object expression values like
+                        // `gap={{ default: 'spacerNone', md: 'spacerMd' }}`,
+                        // also check individual string values inside the object.
+                        let object_match = prop
+                            .object_string_values
+                            .iter()
+                            .any(|v| val_re.is_match(v));
+
+                        if !direct_match && !object_match {
                             continue;
                         }
                     }
@@ -3332,5 +3343,98 @@ const useProps = () => {
             incidents.len(), 0,
             "Non-Props type should not produce incidents"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Object expression prop values (responsive breakpoint maps)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn query_jsx_prop_object_value_match() {
+        // gap={{ default: 'spacerNone', md: 'spacerMd' }} should match value: ^spacerNone$
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarGroup } from '@patternfly/react-core';
+const App = () => (
+    <ToolbarGroup gap={{ default: 'spacerNone', md: 'spacerMd' }}>
+        <div>content</div>
+    </ToolbarGroup>
+);
+"#,
+        )]);
+        let mut c = cond("^gap$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarGroup$".to_string());
+        c.value = Some("^spacerNone$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should match spacerNone inside object expression value"
+        );
+    }
+
+    #[test]
+    fn query_jsx_prop_object_value_no_match() {
+        // gap={{ default: 'gapNone' }} should NOT match value: ^spacerNone$
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarGroup } from '@patternfly/react-core';
+const App = () => (
+    <ToolbarGroup gap={{ default: 'gapNone' }}>
+        <div>content</div>
+    </ToolbarGroup>
+);
+"#,
+        )]);
+        let mut c = cond("^gap$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarGroup$".to_string());
+        c.value = Some("^spacerNone$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 0,
+            "gapNone should not match spacerNone"
+        );
+    }
+
+    #[test]
+    fn query_jsx_prop_object_value_second_key_match() {
+        // gap={{ default: 'gapNone', md: 'spacerMd' }} should match value: ^spacerMd$
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { ToolbarGroup } from '@patternfly/react-core';
+const App = () => (
+    <ToolbarGroup gap={{ default: 'gapNone', md: 'spacerMd' }}>
+        <div>content</div>
+    </ToolbarGroup>
+);
+"#,
+        )]);
+        let mut c = cond("^gap$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^ToolbarGroup$".to_string());
+        c.value = Some("^spacerMd$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(
+            incidents.len(), 1,
+            "Should match spacerMd in second object value"
+        );
+    }
+
+    #[test]
+    fn query_jsx_prop_string_value_still_works() {
+        // Direct string value should still work: variant="light"
+        let (dir, index) = build_index(&[(
+            "src/App.tsx",
+            r#"
+import { PageSection } from '@patternfly/react-core';
+const App = () => <PageSection variant="light"><p>ok</p></PageSection>;
+"#,
+        )]);
+        let mut c = cond("^variant$", Some(ReferenceLocation::JsxProp));
+        c.component = Some("^PageSection$".to_string());
+        c.value = Some("^light$".to_string());
+        let incidents = evaluate_referenced(&c, &index, dir.path()).unwrap();
+        assert_eq!(incidents.len(), 1, "Direct string value should still match");
     }
 }
