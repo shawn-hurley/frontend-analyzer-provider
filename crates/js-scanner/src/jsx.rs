@@ -40,6 +40,17 @@ type ImportMap = HashMap<String, String>;
 /// infrastructure to work with both use cases.
 type LocalExprMap<'a> = HashMap<String, &'a Expression<'a>>;
 
+/// Map of function parameter names → (component_name, module) resolved from
+/// their Props-type annotation.
+///
+/// For example, `function AcmModal(props: ModalProps)` where `ModalProps` is
+/// imported from `@patternfly/react-core` produces `"props" → ("Modal", "@patternfly/react-core")`.
+///
+/// This enables the spread resolver to recognize that `<Modal {...props}>` in a
+/// wrapper component forwards all props of the underlying component, even though
+/// the parameter is not a local variable or import that can be value-resolved.
+type ParamTypeMap = HashMap<String, (String, String)>;
+
 /// Shared scanning context passed through the JSX walk tree.
 ///
 /// Bundles the parameters that every walk function needs, avoiding
@@ -85,6 +96,11 @@ struct ScanContext<'a, 'b> {
     /// (e.g., `renderA` → JSX → `renderB` → JSX → `renderA`) are detected
     /// and broken instead of causing a stack overflow.
     resolving_fns: HashSet<String>,
+    /// Map of function parameter names → (component_name, module) from
+    /// Props-type annotations. Used as a fallback when spread resolution
+    /// encounters an identifier that isn't in `local_exprs` or `import_map`
+    /// but has a known Props type (e.g., `props: ModalProps`).
+    param_types: &'b ParamTypeMap,
 }
 
 /// Build a map of all function declarations in the AST, including those
@@ -235,6 +251,127 @@ fn collect_expr_declarations_from_body<'a>(
     }
 }
 
+/// Build a map of function parameter names to their Props-type annotations.
+///
+/// Inspects `FunctionDeclaration` and `VariableDeclaration` (for arrow functions)
+/// parameters. When a parameter has a type annotation that resolves to a PF
+/// component Props type (e.g., `ModalProps` → `("Modal", "@patternfly/react-core")`),
+/// the parameter name is recorded so the spread resolver can use it as a fallback.
+fn build_param_type_map(
+    stmts: &[Statement<'_>],
+    source: &str,
+    import_map: &ImportMap,
+) -> ParamTypeMap {
+    let mut map = ParamTypeMap::new();
+    for stmt in stmts {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                collect_param_types(&func.params, source, import_map, &mut map);
+                // Recurse into the function body for nested component definitions
+                if let Some(body) = &func.body {
+                    let nested = build_param_type_map(&body.statements, source, import_map);
+                    map.extend(nested);
+                }
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                collect_param_types_from_var_decl(var_decl, source, import_map, &mut map);
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                if let Some(Declaration::FunctionDeclaration(func)) = &decl.declaration {
+                    collect_param_types(&func.params, source, import_map, &mut map);
+                    if let Some(body) = &func.body {
+                        let nested = build_param_type_map(&body.statements, source, import_map);
+                        map.extend(nested);
+                    }
+                }
+                if let Some(Declaration::VariableDeclaration(var_decl)) = &decl.declaration {
+                    collect_param_types_from_var_decl(var_decl, source, import_map, &mut map);
+                }
+            }
+            Statement::ExportDefaultDeclaration(decl) => {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(func) = &decl.declaration {
+                    collect_param_types(&func.params, source, import_map, &mut map);
+                }
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Extract parameter types from a variable declaration that may contain
+/// arrow or function expressions (e.g., `const AcmModal = (props: ModalProps) => ...`).
+fn collect_param_types_from_var_decl(
+    var_decl: &VariableDeclaration<'_>,
+    source: &str,
+    import_map: &ImportMap,
+    map: &mut ParamTypeMap,
+) {
+    for declarator in &var_decl.declarations {
+        if let Some(init) = &declarator.init {
+            match init {
+                Expression::ArrowFunctionExpression(arrow) => {
+                    collect_param_types(&arrow.params, source, import_map, map);
+                    let nested = build_param_type_map(&arrow.body.statements, source, import_map);
+                    map.extend(nested);
+                }
+                Expression::FunctionExpression(func) => {
+                    collect_param_types(&func.params, source, import_map, map);
+                    if let Some(body) = &func.body {
+                        let nested = build_param_type_map(&body.statements, source, import_map);
+                        map.extend(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Inspect formal parameters for Props-type annotations and record them.
+fn collect_param_types(
+    params: &FormalParameters<'_>,
+    source: &str,
+    import_map: &ImportMap,
+    map: &mut ParamTypeMap,
+) {
+    for param in &params.items {
+        // Get the type annotation — available on the FormalParameter itself
+        let annotation = match &param.type_annotation {
+            Some(ann) => ann,
+            None => continue,
+        };
+
+        // Try to resolve the type to a (component_name, module) pair
+        let (component_name, module) = match resolve_type_to_props(
+            &annotation.type_annotation,
+            source,
+            import_map,
+        ) {
+            Some(info) => info,
+            None => continue,
+        };
+
+        // Extract the parameter binding name
+        match &param.pattern {
+            // Simple identifier: (props: ModalProps)
+            BindingPattern::BindingIdentifier(ident) => {
+                map.insert(
+                    ident.name.to_string(),
+                    (component_name, module),
+                );
+            }
+            // Destructured: ({ title, actions }: ModalProps)
+            // Each property is effectively a named prop being extracted.
+            // We don't need to record these in the param_type_map because
+            // destructured props used directly (e.g., <Modal title={title}>)
+            // are already visible to the scanner as regular JSX attributes.
+            BindingPattern::ObjectPattern(_) => {}
+            _ => {}
+        }
+    }
+}
+
 /// Scan all statements in a program body for JSX component and prop usage.
 ///
 /// This file-level entry point builds a local function map first, then walks
@@ -295,6 +432,7 @@ pub fn scan_jsx_file_with_resolver<'a>(
     file_path: Option<&Path>,
 ) -> Vec<Incident> {
     let local_exprs = build_local_expr_map(stmts, source);
+    let param_types = build_param_type_map(stmts, source, import_map);
     let mut incidents = Vec::new();
     let mut ctx = ScanContext {
         source,
@@ -311,6 +449,7 @@ pub fn scan_jsx_file_with_resolver<'a>(
         resolver,
         file_path,
         resolving_fns: HashSet::new(),
+        param_types: &param_types,
     };
     for stmt in stmts {
         walk_statement_for_jsx(stmt, &mut ctx, None);
@@ -329,6 +468,7 @@ pub fn scan_jsx(
 ) -> Vec<Incident> {
     let empty_exprs = LocalExprMap::new();
     let empty_transparent = HashMap::new();
+    let empty_param_types = ParamTypeMap::new();
     let mut incidents = Vec::new();
     let mut ctx = ScanContext {
         source,
@@ -345,6 +485,7 @@ pub fn scan_jsx(
         resolver: None,
         file_path: None,
         resolving_fns: HashSet::new(),
+        param_types: &empty_param_types,
     };
     walk_statement_for_jsx(stmt, &mut ctx, None);
     incidents
@@ -1455,6 +1596,7 @@ struct SpreadResolveCtx<'a, 'b> {
     import_map: &'b ImportMap,
     resolver: Option<&'b Resolver>,
     file_path: Option<&'b Path>,
+    param_types: &'b ParamTypeMap,
 }
 
 /// Extract property names from a spread expression.
@@ -1531,7 +1673,19 @@ fn collect_spread_props(
             // Cross-file: check import_map, resolve, parse, extract
             let module_source = match spread_ctx.import_map.get(name) {
                 Some(m) => m.clone(),
-                None => return,
+                None => {
+                    // Fallback: check if this identifier is a function parameter
+                    // with a Props-type annotation (e.g., `props: ModalProps`).
+                    // When all props of a component type flow through a spread,
+                    // emit a marker so check_jsx_element can generate an incident.
+                    if let Some((component_name, module)) = spread_ctx.param_types.get(name) {
+                        results.push((
+                            format!("__typed_spread__:{}:{}", component_name, module),
+                            ident.span,
+                        ));
+                    }
+                    return;
+                }
             };
             let (resolver, file_path) = match (spread_ctx.resolver, spread_ctx.file_path) {
                 (Some(r), Some(p)) => (r, p),
@@ -1967,11 +2121,66 @@ fn check_jsx_element(el: &JSXElement<'_>, ctx: &mut ScanContext, parent_name: Op
             import_map: ctx.import_map,
             resolver: ctx.resolver,
             file_path: ctx.file_path,
+            param_types: ctx.param_types,
         };
         for attr in &opening.attributes {
             if let JSXAttributeItem::SpreadAttribute(spread) = attr {
                 let spread_props = extract_spread_prop_names(&spread.argument, &spread_ctx);
                 for (prop_name, span) in spread_props {
+                    // Check for typed parameter spread markers.
+                    // When a function parameter has a Props-type annotation
+                    // (e.g., `props: ModalProps`) and is spread onto the matching
+                    // component (`<Modal {...props}>`), ALL props of that component
+                    // flow through. Emit an incident so the rule matches.
+                    if let Some(marker) = prop_name.strip_prefix("__typed_spread__:") {
+                        if let Some((spread_component, spread_module)) = marker.split_once(':') {
+                            // Only match if the typed spread's component matches the
+                            // JSX element we're scanning AND the module matches.
+                            if spread_component == component_name {
+                                if let Some(elem_module) = ctx.import_map.get(&component_name) {
+                                    if elem_module == spread_module
+                                        && matches!(
+                                            ctx.location,
+                                            Some(ReferenceLocation::JsxProp) | None
+                                        )
+                                    {
+                                        let mut incident = make_incident(
+                                            ctx.source,
+                                            ctx.file_uri,
+                                            span.start,
+                                            span.end,
+                                        );
+                                        incident.variables.insert(
+                                            "componentName".into(),
+                                            serde_json::Value::String(component_name.clone()),
+                                        );
+                                        incident.variables.insert(
+                                            "module".into(),
+                                            serde_json::Value::String(elem_module.clone()),
+                                        );
+                                        incident.variables.insert(
+                                            "typedSpread".into(),
+                                            serde_json::Value::String("true".to_string()),
+                                        );
+                                        incident.variables.insert(
+                                            "spreadType".into(),
+                                            serde_json::Value::String(format!(
+                                                "{}Props",
+                                                spread_component
+                                            )),
+                                        );
+                                        incident.variables.insert(
+                                            "spreadSource".into(),
+                                            serde_json::Value::String("true".to_string()),
+                                        );
+                                        ctx.incidents.push(incident);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     if ctx.pattern.is_match(&prop_name) {
                         let mut incident =
                             make_incident(ctx.source, ctx.file_uri, span.start, span.end);
@@ -4057,6 +4266,115 @@ const el = <Modal {...props}>content</Modal>;
         assert!(
             incidents.is_empty(),
             "Should not produce incidents for unresolvable spread identifiers"
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_spread_typed_parameter() {
+        // Function parameter with Props type annotation spread onto matching
+        // component — should produce a typed spread incident.
+        let source = r#"
+import { Modal, ModalProps } from '@patternfly/react-core';
+function AcmModal(props: ModalProps) {
+    return <Modal {...props}>content</Modal>;
+}
+"#;
+        let incidents = scan_source_jsx(source, r"^actions$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should produce incident for typed parameter spread"
+        );
+        assert_eq!(
+            incidents[0].variables.get("typedSpread"),
+            Some(&serde_json::Value::String("true".to_string()))
+        );
+        assert_eq!(
+            incidents[0].variables.get("spreadType"),
+            Some(&serde_json::Value::String("ModalProps".to_string()))
+        );
+        assert_eq!(
+            incidents[0].variables.get("componentName"),
+            Some(&serde_json::Value::String("Modal".to_string()))
+        );
+        assert_eq!(
+            incidents[0].variables.get("module"),
+            Some(&serde_json::Value::String("@patternfly/react-core".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_spread_typed_parameter_arrow() {
+        // Arrow function with Props type annotation
+        let source = r#"
+import { Modal, ModalProps } from '@patternfly/react-core';
+const AcmModal = (props: ModalProps) => {
+    return <Modal {...props}>content</Modal>;
+};
+"#;
+        let incidents = scan_source_jsx(source, r"^title$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should produce incident for typed parameter spread in arrow function"
+        );
+        assert_eq!(
+            incidents[0].variables.get("typedSpread"),
+            Some(&serde_json::Value::String("true".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_spread_typed_parameter_wrong_component() {
+        // Parameter typed as ButtonProps but spread onto Modal — should NOT match
+        let source = r#"
+import { Modal, ButtonProps } from '@patternfly/react-core';
+function Wrapper(props: ButtonProps) {
+    return <Modal {...props}>content</Modal>;
+}
+"#;
+        let incidents = scan_source_jsx(source, r"^actions$", Some(&ReferenceLocation::JsxProp));
+        assert!(
+            incidents.is_empty(),
+            "Should not match when Props type doesn't match the target component"
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_spread_untyped_parameter_no_incidents() {
+        // Parameter without type annotation — should NOT produce incidents
+        // (same as the existing unresolvable test but explicitly for a function param)
+        let source = r#"
+import { Modal } from '@patternfly/react-core';
+function Wrapper(props) {
+    return <Modal {...props}>content</Modal>;
+}
+"#;
+        let incidents = scan_source_jsx(source, r"^actions$", Some(&ReferenceLocation::JsxProp));
+        assert!(
+            incidents.is_empty(),
+            "Should not produce incidents for untyped parameter spread"
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_spread_typed_parameter_partial() {
+        // Partial<ModalProps> should still resolve via utility type unwrapping
+        let source = r#"
+import { Modal, ModalProps } from '@patternfly/react-core';
+function AcmModal(props: Partial<ModalProps>) {
+    return <Modal {...props}>content</Modal>;
+}
+"#;
+        let incidents = scan_source_jsx(source, r"^title$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should resolve Partial<ModalProps> to Modal"
+        );
+        assert_eq!(
+            incidents[0].variables.get("typedSpread"),
+            Some(&serde_json::Value::String("true".to_string()))
         );
     }
 
