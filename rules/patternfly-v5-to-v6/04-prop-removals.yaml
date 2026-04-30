@@ -134,3 +134,19 @@
   when:
     frontend.referenced: { pattern: "^selectableActions$", location: JSX_PROP, component: "^CardHeader$" }
   message: "CardHeader 'selectableActions' changed in PF v6: for clickable-only cards, selectableActionId and name are no longer needed. Codemod: cardHeader-update-selectableActions"
+
+- ruleID: pfv6-prop-remove-menuappendto
+  description: "menuAppendTo prop removed from Select/Dropdown in PFv6"
+  labels:
+    - change-type=prop-removal
+    - has-codemod=false
+  effort: 1
+  category: mandatory
+  when:
+    frontend.referenced:
+      pattern: "^menuAppendTo$"
+      location: JSX_PROP
+  message: |
+    The menuAppendTo prop was removed in PFv6. Remove it from component usage.
+    If you need to control where the menu renders, use popperProps={{ appendTo: 'parent' }}
+    on the PFv6 Select/Dropdown component instead.

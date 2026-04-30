@@ -270,3 +270,25 @@
       pattern: "^WizardFooter$"
       location: JSX_COMPONENT
   message: "WizardFooter default footer now uses an ActionList wrapper around Button elements in PF v6. CSS selectors or snapshot tests may break."
+
+- ruleID: pfv6-dom-formgroup-error-modifier-relocated
+  description: "FormGroup: pf-m-error modifier moved to form-control element"
+  labels:
+    - change-type=dom-structure
+    - change-type=test-impact
+    - has-codemod=false
+    - impact=frontend-testing
+  effort: 2
+  category: potential
+  when:
+    builtin.filecontent:
+      pattern: "pf-m-error"
+      filePattern: ".*\\.(test|spec)\\.(ts|tsx|js|jsx)$"
+  message: |
+    In PFv6, the pf-m-error CSS modifier moved from FormGroup's wrapper element
+    to the pf-v6-c-form-control element and pf-v6-c-helper-text__item element.
+
+    Tests asserting toContainHTML('pf-m-error') on a FormGroup wrapper element
+    will fail. Check for pf-m-error on descendant form-control or helper-text
+    elements instead, or use the component's validated prop/state to verify
+    error state.
