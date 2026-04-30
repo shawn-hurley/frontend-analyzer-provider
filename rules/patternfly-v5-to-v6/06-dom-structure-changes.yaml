@@ -281,7 +281,7 @@
   effort: 2
   category: potential
   when:
-    builtin.filecontent:
+    frontend.cssclass:
       pattern: "pf-m-error"
       filePattern: ".*\\.(test|spec)\\.(ts|tsx|js|jsx)$"
   message: |
