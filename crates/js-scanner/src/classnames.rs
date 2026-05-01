@@ -290,8 +290,68 @@ fn walk_expr(
         }
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
-                if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                    walk_expr(&p.value, source, pattern, file_uri, incidents);
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(p) => {
+                        // Check string-literal property keys for CSS-in-JS selectors
+                        // e.g. { '& .pf-v5-c-card__body': { padding: '0' } }
+                        if let PropertyKey::StringLiteral(s) = &p.key {
+                            let text = s.value.as_str();
+                            if pattern.is_match(text) {
+                                let span = s.span();
+                                let mut incident =
+                                    make_incident(source, file_uri, span.start, span.end);
+                                incident.variables.insert(
+                                    "matchingText".into(),
+                                    serde_json::Value::String(text.to_string()),
+                                );
+                                incidents.push(incident);
+                            }
+                        }
+                        // Handle computed property keys:
+                        //   ['& .pf-v5-c-foo' as any]: { ... }
+                        //   [`& .pf-v5-c-foo`]: { ... }
+                        if p.computed {
+                            match &p.key {
+                                PropertyKey::TSAsExpression(ts) => {
+                                    if let Expression::StringLiteral(s) = &ts.expression {
+                                        let text = s.value.as_str();
+                                        if pattern.is_match(text) {
+                                            let span = s.span();
+                                            let mut incident = make_incident(
+                                                source, file_uri, span.start, span.end,
+                                            );
+                                            incident.variables.insert(
+                                                "matchingText".into(),
+                                                serde_json::Value::String(text.to_string()),
+                                            );
+                                            incidents.push(incident);
+                                        }
+                                    }
+                                }
+                                PropertyKey::TemplateLiteral(tpl) => {
+                                    for quasi in &tpl.quasis {
+                                        let raw = quasi.value.raw.as_str();
+                                        if pattern.is_match(raw) {
+                                            let span = quasi.span();
+                                            let mut incident = make_incident(
+                                                source, file_uri, span.start, span.end,
+                                            );
+                                            incident.variables.insert(
+                                                "matchingText".into(),
+                                                serde_json::Value::String(raw.to_string()),
+                                            );
+                                            incidents.push(incident);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        walk_expr(&p.value, source, pattern, file_uri, incidents);
+                    }
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        walk_expr(&spread.argument, source, pattern, file_uri, incidents);
+                    }
                 }
             }
         }
@@ -945,6 +1005,30 @@ mod tests {
             incidents.len(),
             1,
             "Should find pf-v5 in spread property value"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_computed_property_key_with_ts_as() {
+        // Computed key with TS type assertion:
+        // { ['& .pf-v5-c-card__body' as any]: { padding: '0' } }
+        let source = r#"
+            const styles = {
+                ['& .pf-v5-c-card__body' as any]: { padding: '0' },
+            };
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 in computed property key with TS 'as' cast"
+        );
+        assert_eq!(
+            incidents[0]
+                .variables
+                .get("matchingText")
+                .and_then(|v| v.as_str()),
+            Some("& .pf-v5-c-card__body"),
         );
     }
 

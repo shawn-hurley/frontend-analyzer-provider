@@ -233,26 +233,68 @@ fn walk_expr(
         }
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
-                if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                    // Check property keys (e.g. { "--pf-v5-c-label--Color": value })
-                    if let PropertyKey::StringLiteral(s) = &p.key {
-                        let text = s.value.as_str();
-                        if pattern.is_match(text) {
-                            let span = s.span();
-                            let mut incident =
-                                make_incident(source, file_uri, span.start, span.end);
-                            incident.variables.insert(
-                                "matchingText".into(),
-                                serde_json::Value::String(text.to_string()),
-                            );
-                            incidents.push(incident);
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(p) => {
+                        // Check property keys (e.g. { "--pf-v5-c-label--Color": value })
+                        if let PropertyKey::StringLiteral(s) = &p.key {
+                            let text = s.value.as_str();
+                            if pattern.is_match(text) {
+                                let span = s.span();
+                                let mut incident =
+                                    make_incident(source, file_uri, span.start, span.end);
+                                incident.variables.insert(
+                                    "matchingText".into(),
+                                    serde_json::Value::String(text.to_string()),
+                                );
+                                incidents.push(incident);
+                            }
                         }
+                        // Handle computed property keys:
+                        //   ['--pf-v5-c-button--PaddingRight' as any]: '0px'
+                        //   [`--pf-v5-c-button--PaddingRight`]: '0px'
+                        if p.computed {
+                            match &p.key {
+                                PropertyKey::TSAsExpression(ts) => {
+                                    if let Expression::StringLiteral(s) = &ts.expression {
+                                        let text = s.value.as_str();
+                                        if pattern.is_match(text) {
+                                            let span = s.span();
+                                            let mut incident = make_incident(
+                                                source, file_uri, span.start, span.end,
+                                            );
+                                            incident.variables.insert(
+                                                "matchingText".into(),
+                                                serde_json::Value::String(text.to_string()),
+                                            );
+                                            incidents.push(incident);
+                                        }
+                                    }
+                                }
+                                PropertyKey::TemplateLiteral(tpl) => {
+                                    for quasi in &tpl.quasis {
+                                        let raw = quasi.value.raw.as_str();
+                                        if pattern.is_match(raw) {
+                                            let span = quasi.span();
+                                            let mut incident = make_incident(
+                                                source, file_uri, span.start, span.end,
+                                            );
+                                            incident.variables.insert(
+                                                "matchingText".into(),
+                                                serde_json::Value::String(raw.to_string()),
+                                            );
+                                            incidents.push(incident);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Also walk property values
+                        walk_expr(&p.value, source, pattern, file_uri, incidents);
                     }
-                    // Also walk property values
-                    walk_expr(&p.value, source, pattern, file_uri, incidents);
-                }
-                if let ObjectPropertyKind::SpreadProperty(spread) = prop {
-                    walk_expr(&spread.argument, source, pattern, file_uri, incidents);
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        walk_expr(&spread.argument, source, pattern, file_uri, incidents);
+                    }
                 }
             }
         }
@@ -839,6 +881,44 @@ mod tests {
             incidents.len(),
             1,
             "Should find CSS var inside IIFE"
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_computed_property_key_with_ts_as() {
+        // style={{ ['--pf-v5-c-button--PaddingRight' as any]: '0px' }}
+        let source = r#"
+            const el = <div
+                style={{ ['--pf-v5-c-button--PaddingRight' as any]: '0px' }}
+            />;
+        "#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var in computed property key with TS 'as' cast"
+        );
+        assert_eq!(
+            incidents[0]
+                .variables
+                .get("matchingText")
+                .and_then(|v| v.as_str()),
+            Some("--pf-v5-c-button--PaddingRight"),
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_computed_template_literal_key() {
+        let source = r#"
+            const styles = {
+                [`--pf-v5-c-button--PaddingRight`]: '0px',
+            };
+        "#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var in computed template literal property key"
         );
     }
 }
