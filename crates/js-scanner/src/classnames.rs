@@ -220,6 +220,70 @@ fn walk_class_body(
     }
 }
 
+/// Create one incident per regex match within a template quasi's raw text.
+///
+/// When a quasi spans multiple lines (e.g., a CSS-in-JS tagged template),
+/// the quasi's `span().start` points to the beginning of the entire quasi,
+/// not to the line where the match actually appears. This function finds
+/// each match within the raw text and computes the correct byte offset so
+/// that `make_incident` reports the right line number for the fix-engine.
+fn incidents_from_quasi_matches(
+    raw: &str,
+    quasi_start: u32,
+    source: &str,
+    pattern: &Regex,
+    file_uri: &str,
+    incidents: &mut Vec<Incident>,
+) {
+    for m in pattern.find_iter(raw) {
+        let match_offset = quasi_start + m.start() as u32;
+        let match_end = quasi_start + m.end() as u32;
+        let mut incident = make_incident(source, file_uri, match_offset, match_end);
+        incident.variables.insert(
+            "matchingText".into(),
+            serde_json::Value::String(raw.to_string()),
+        );
+        incidents.push(incident);
+    }
+}
+
+/// Recursively walk a `ChainElement` from an optional-chaining expression.
+/// Chains can be arbitrarily deep (e.g., `foo?.bar()?.baz?.qux()`), and the
+/// chain element can be a `CallExpression` (walk its arguments) or a
+/// `MemberExpression` variant (walk its `object`, which may itself be a call).
+fn walk_chain_element(
+    element: &ChainElement<'_>,
+    source: &str,
+    pattern: &Regex,
+    file_uri: &str,
+    incidents: &mut Vec<Incident>,
+) {
+    match element {
+        ChainElement::CallExpression(call) => {
+            // Walk the callee in case it contains matching strings
+            walk_expr(&call.callee, source, pattern, file_uri, incidents);
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    walk_expr(e, source, pattern, file_uri, incidents);
+                }
+            }
+        }
+        ChainElement::StaticMemberExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+        }
+        ChainElement::ComputedMemberExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+            walk_expr(&member.expression, source, pattern, file_uri, incidents);
+        }
+        ChainElement::PrivateFieldExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+        }
+        ChainElement::TSNonNullExpression(ts) => {
+            walk_expr(&ts.expression, source, pattern, file_uri, incidents);
+        }
+    }
+}
+
 fn walk_expr(
     expr: &Expression<'_>,
     source: &str,
@@ -244,13 +308,14 @@ fn walk_expr(
             for quasi in &tpl.quasis {
                 let raw = quasi.value.raw.as_str();
                 if pattern.is_match(raw) {
-                    let span = quasi.span();
-                    let mut incident = make_incident(source, file_uri, span.start, span.end);
-                    incident.variables.insert(
-                        "matchingText".into(),
-                        serde_json::Value::String(raw.to_string()),
+                    incidents_from_quasi_matches(
+                        raw,
+                        quasi.span().start,
+                        source,
+                        pattern,
+                        file_uri,
+                        incidents,
                     );
-                    incidents.push(incident);
                 }
             }
         }
@@ -375,14 +440,9 @@ fn walk_expr(
             walk_expr(&ts.expression, source, pattern, file_uri, incidents);
         }
         // Optional chaining: items?.map((item) => <div className="pf-v5-...">)
+        // Also handles member access after call: querySelector(...)?.innerHTML
         Expression::ChainExpression(chain) => {
-            if let ChainElement::CallExpression(call) = &chain.expression {
-                for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression() {
-                        walk_expr(e, source, pattern, file_uri, incidents);
-                    }
-                }
-            }
+            walk_chain_element(&chain.expression, source, pattern, file_uri, incidents);
         }
         // Await/yield: const el = await getElement(); may contain JSX
         Expression::AwaitExpression(a) => {
@@ -416,13 +476,14 @@ fn walk_expr(
             for quasi in &tagged.quasi.quasis {
                 let raw = quasi.value.raw.as_str();
                 if pattern.is_match(raw) {
-                    let span = quasi.span();
-                    let mut incident = make_incident(source, file_uri, span.start, span.end);
-                    incident.variables.insert(
-                        "matchingText".into(),
-                        serde_json::Value::String(raw.to_string()),
+                    incidents_from_quasi_matches(
+                        raw,
+                        quasi.span().start,
+                        source,
+                        pattern,
+                        file_uri,
+                        incidents,
                     );
-                    incidents.push(incident);
                 }
             }
         }
@@ -731,6 +792,75 @@ mod tests {
         "#;
         let incidents = scan_source(source, r"pf-v5-");
         assert_eq!(incidents.len(), 1);
+    }
+
+    #[test]
+    fn test_classname_in_queryselector_with_optional_member_access() {
+        // Bug: querySelector(...)?.innerHTML — ChainElement::StaticMemberExpression
+        // was not traversed, so the template literal argument was missed
+        let source = r#"
+            expect(
+              container.querySelector(
+                `[data-ouia-component-id=${id}] td.pf-v5-c-table__action`
+              )?.innerHTML
+            ).toBeDefined()
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find pf-v5 inside querySelector() followed by ?.innerHTML"
+        );
+    }
+
+    #[test]
+    fn test_classname_in_deep_optional_chain() {
+        // Deep chain: foo?.bar()?.baz?.qux — multiple levels of optional access
+        let source = r#"
+            const text = container.querySelector('.pf-v5-c-alert')?.querySelector('.pf-v5-c-alert__title')?.textContent;
+        "#;
+        let incidents = scan_source(source, r"pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            2,
+            "Should find both pf-v5 classes in deep optional chain"
+        );
+    }
+
+    #[test]
+    fn test_tagged_template_multiline_reports_correct_line_per_match() {
+        // Bug: css`...` with multiple classes across lines reported all
+        // incidents on the tagged template start line, not the match line.
+        // This caused the fix-engine to look on the wrong line and skip the fix.
+        let source = "const cls = css`\n  span.pf-v5-c-menu-toggle__text {\n    width: 100%;\n  }\n  span.pf-v5-c-menu-toggle__controls {\n    padding: 0;\n  }\n`;\n";
+        let incidents = scan_source(source, r"pf-v5-c-menu-toggle");
+        assert_eq!(
+            incidents.len(),
+            2,
+            "Should find both pf-v5 classes in multi-line tagged template"
+        );
+        // First match is on line 2 (span.pf-v5-c-menu-toggle__text)
+        assert_eq!(
+            incidents[0].line_number,
+            Some(2),
+            "First match should be on line 2, not line 1"
+        );
+        // Second match is on line 5 (span.pf-v5-c-menu-toggle__controls)
+        assert_eq!(
+            incidents[1].line_number,
+            Some(5),
+            "Second match should be on line 5, not line 1"
+        );
+    }
+
+    #[test]
+    fn test_template_literal_multiline_reports_correct_line() {
+        // Same issue for regular template literals (no tag)
+        let source = "const q = `\n  .pf-v5-c-table {\n    color: red;\n  }\n  .pf-v5-c-table__action {\n    display: none;\n  }\n`;\n";
+        let incidents = scan_source(source, r"pf-v5-c-table");
+        assert_eq!(incidents.len(), 2);
+        assert_eq!(incidents[0].line_number, Some(2));
+        assert_eq!(incidents[1].line_number, Some(5));
     }
 
     #[test]

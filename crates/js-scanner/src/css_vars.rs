@@ -163,6 +163,64 @@ fn walk_stmt(
     }
 }
 
+/// Create one incident per regex match within a template quasi's raw text.
+///
+/// See `classnames.rs::incidents_from_quasi_matches` for full rationale.
+fn incidents_from_quasi_matches(
+    raw: &str,
+    quasi_start: u32,
+    source: &str,
+    pattern: &Regex,
+    file_uri: &str,
+    incidents: &mut Vec<Incident>,
+) {
+    for m in pattern.find_iter(raw) {
+        let match_offset = quasi_start + m.start() as u32;
+        let match_end = quasi_start + m.end() as u32;
+        let mut incident = make_incident(source, file_uri, match_offset, match_end);
+        incident.variables.insert(
+            "matchingText".into(),
+            serde_json::Value::String(raw.to_string()),
+        );
+        incidents.push(incident);
+    }
+}
+
+/// Recursively walk a `ChainElement` from an optional-chaining expression.
+/// Handles `CallExpression` (walk arguments), `MemberExpression` variants
+/// (walk the object), and `TSNonNullExpression` (walk the inner expression).
+fn walk_chain_element(
+    element: &ChainElement<'_>,
+    source: &str,
+    pattern: &Regex,
+    file_uri: &str,
+    incidents: &mut Vec<Incident>,
+) {
+    match element {
+        ChainElement::CallExpression(call) => {
+            walk_expr(&call.callee, source, pattern, file_uri, incidents);
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    walk_expr(e, source, pattern, file_uri, incidents);
+                }
+            }
+        }
+        ChainElement::StaticMemberExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+        }
+        ChainElement::ComputedMemberExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+            walk_expr(&member.expression, source, pattern, file_uri, incidents);
+        }
+        ChainElement::PrivateFieldExpression(member) => {
+            walk_expr(&member.object, source, pattern, file_uri, incidents);
+        }
+        ChainElement::TSNonNullExpression(ts) => {
+            walk_expr(&ts.expression, source, pattern, file_uri, incidents);
+        }
+    }
+}
+
 fn walk_expr(
     expr: &Expression<'_>,
     source: &str,
@@ -187,13 +245,14 @@ fn walk_expr(
             for quasi in &tpl.quasis {
                 let raw = quasi.value.raw.as_str();
                 if pattern.is_match(raw) {
-                    let span = quasi.span();
-                    let mut incident = make_incident(source, file_uri, span.start, span.end);
-                    incident.variables.insert(
-                        "matchingText".into(),
-                        serde_json::Value::String(raw.to_string()),
+                    incidents_from_quasi_matches(
+                        raw,
+                        quasi.span().start,
+                        source,
+                        pattern,
+                        file_uri,
+                        incidents,
                     );
-                    incidents.push(incident);
                 }
             }
         }
@@ -318,14 +377,9 @@ fn walk_expr(
             walk_expr(&ts.expression, source, pattern, file_uri, incidents);
         }
         // Optional chaining: items?.map((item) => style with CSS var)
+        // Also handles member access after call: getStyle(...)?.cssText
         Expression::ChainExpression(chain) => {
-            if let ChainElement::CallExpression(call) = &chain.expression {
-                for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression() {
-                        walk_expr(e, source, pattern, file_uri, incidents);
-                    }
-                }
-            }
+            walk_chain_element(&chain.expression, source, pattern, file_uri, incidents);
         }
         // Await/yield: const el = await getStyles(); may contain CSS vars
         Expression::AwaitExpression(a) => {
@@ -359,13 +413,14 @@ fn walk_expr(
             for quasi in &tagged.quasi.quasis {
                 let raw = quasi.value.raw.as_str();
                 if pattern.is_match(raw) {
-                    let span = quasi.span();
-                    let mut incident = make_incident(source, file_uri, span.start, span.end);
-                    incident.variables.insert(
-                        "matchingText".into(),
-                        serde_json::Value::String(raw.to_string()),
+                    incidents_from_quasi_matches(
+                        raw,
+                        quasi.span().start,
+                        source,
+                        pattern,
+                        file_uri,
+                        incidents,
                     );
-                    incidents.push(incident);
                 }
             }
         }
@@ -773,8 +828,8 @@ mod tests {
         let incidents = scan_source(source, r"--pf-v5-");
         assert_eq!(
             incidents.len(),
-            1,
-            "Should find CSS var in tagged template literal"
+            2,
+            "Should find each CSS var match in tagged template literal"
         );
     }
 
@@ -919,6 +974,56 @@ mod tests {
             incidents.len(),
             1,
             "Should find CSS var in computed template literal property key"
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_optional_chain_member_access() {
+        // Bug: getComputedStyle(el)?.getPropertyValue("--pf-v5-...")
+        // ChainElement::StaticMemberExpression was not traversed
+        let source =
+            r#"const val = getComputedStyle(el)?.getPropertyValue("--pf-v5-global--Color--100");"#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var inside optional chain member access"
+        );
+    }
+
+    #[test]
+    fn test_css_var_in_optional_chain_property_read() {
+        // el.style.getPropertyValue("--pf-v5-...")?.trim()
+        let source =
+            r#"const val = el.style.getPropertyValue("--pf-v5-global--spacer--md")?.trim();"#;
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find CSS var when result has optional chain method call"
+        );
+    }
+
+    #[test]
+    fn test_tagged_template_multiline_reports_correct_line_per_match() {
+        // Bug: css`...` with multiple CSS vars across lines reported all
+        // incidents on the tagged template start line, not the match line.
+        let source = "const styles = css`\n  color: var(--pf-v5-global--Color--100);\n  font-size: var(--pf-v5-global--FontSize--md);\n`;\n";
+        let incidents = scan_source(source, r"--pf-v5-");
+        assert_eq!(
+            incidents.len(),
+            2,
+            "Should find both CSS vars in multi-line tagged template"
+        );
+        assert_eq!(
+            incidents[0].line_number,
+            Some(2),
+            "First CSS var should be on line 2, not line 1"
+        );
+        assert_eq!(
+            incidents[1].line_number,
+            Some(3),
+            "Second CSS var should be on line 3, not line 1"
         );
     }
 }
