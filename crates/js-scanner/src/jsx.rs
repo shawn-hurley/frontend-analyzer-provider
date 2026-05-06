@@ -4615,4 +4615,133 @@ const el = <Modal {...getProps()}>content</Modal>;
             "Should handle parenthesized return expression"
         );
     }
+
+    // ── Ternary + arrow function body JSX_PROP tests ────────────────
+
+    #[test]
+    fn test_jsx_prop_in_ternary_return_arrow_body() {
+        // Reproduces the WhenExpressionDecorator.tsx pattern:
+        // React.FC typed arrow function with block body, return ternary,
+        // parenthesized JSX, and popperProps on <Tooltip>.
+        let source = r#"
+import * as React from 'react';
+import { Tooltip } from '@patternfly/react-core';
+
+type Props = { enabled: boolean };
+
+const MyComponent: React.FC<Props> = ({ enabled }) => {
+    const nodeRef = React.useRef();
+    return enabled ? (
+        <Tooltip
+            triggerRef={nodeRef}
+            position="bottom"
+            popperProps={{ appendTo: 'inline' }}
+        >
+            <span>child</span>
+        </Tooltip>
+    ) : (
+        <span>no tooltip</span>
+    );
+};
+
+export default MyComponent;
+"#;
+        let incidents =
+            scan_source_jsx(source, r"^popperProps$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find popperProps on Tooltip inside ternary return in arrow function body"
+        );
+        assert_eq!(
+            incidents[0].variables.get("componentName"),
+            Some(&serde_json::Value::String("Tooltip".to_string()))
+        );
+        assert_eq!(
+            incidents[0].variables.get("propName"),
+            Some(&serde_json::Value::String("popperProps".to_string()))
+        );
+        assert_eq!(
+            incidents[0].variables.get("module"),
+            Some(&serde_json::Value::String(
+                "@patternfly/react-core".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_in_simple_return() {
+        // Control test: same pattern without ternary — should definitely work.
+        let source = r#"
+import { Tooltip } from '@patternfly/react-core';
+
+const MyComponent = () => {
+    return (
+        <Tooltip popperProps={{ appendTo: 'inline' }}>
+            <span>child</span>
+        </Tooltip>
+    );
+};
+"#;
+        let incidents =
+            scan_source_jsx(source, r"^popperProps$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find popperProps in simple return"
+        );
+        assert_eq!(
+            incidents[0].variables.get("componentName"),
+            Some(&serde_json::Value::String("Tooltip".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_in_ternary_no_type_annotation() {
+        // Ternary without React.FC type annotation.
+        let source = r#"
+import { Tooltip } from '@patternfly/react-core';
+
+const MyComponent = ({ enabled }) => {
+    return enabled ? (
+        <Tooltip popperProps={{ appendTo: 'inline' }}>
+            <span>child</span>
+        </Tooltip>
+    ) : (
+        <span>no tooltip</span>
+    );
+};
+"#;
+        let incidents =
+            scan_source_jsx(source, r"^popperProps$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find popperProps in ternary return without type annotation"
+        );
+    }
+
+    #[test]
+    fn test_jsx_prop_in_ternary_inline_arrow() {
+        // Concise arrow expression body with ternary (no block/return).
+        let source = r#"
+import { Tooltip } from '@patternfly/react-core';
+
+const MyComponent = ({ enabled }) =>
+    enabled ? (
+        <Tooltip popperProps={{ appendTo: 'inline' }}>
+            <span>child</span>
+        </Tooltip>
+    ) : (
+        <span>no tooltip</span>
+    );
+"#;
+        let incidents =
+            scan_source_jsx(source, r"^popperProps$", Some(&ReferenceLocation::JsxProp));
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find popperProps in ternary with concise arrow body"
+        );
+    }
 }

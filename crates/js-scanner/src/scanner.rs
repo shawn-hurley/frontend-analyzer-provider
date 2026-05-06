@@ -2401,4 +2401,104 @@ const el = <Modal {...someProps}>content</Modal>;
             "Should not produce incidents for node_modules spread identifiers"
         );
     }
+
+    // ── Reproduction test: popperProps on Tooltip in ternary ─────────
+
+    #[test]
+    fn test_popperprops_on_tooltip_in_ternary_arrow_body() {
+        // Reproduces the WhenExpressionDecorator.tsx pattern exactly:
+        // React.FC typed arrow function, block body, return ternary,
+        // parenthesized JSX, popperProps on <Tooltip>.
+        //
+        // Uses scan_file_referenced (production entry point) to test
+        // the full pipeline including post-filters.
+        let source = r#"
+import * as React from 'react';
+import { Tooltip } from '@patternfly/react-core';
+
+type WhenExpressionDecoratorProps = {
+    enabled: boolean;
+};
+
+const WhenExpressionDecorator: React.FC<WhenExpressionDecoratorProps> = ({
+    enabled,
+}) => {
+    const nodeRef = React.useRef();
+    const diamondNode = (
+        <g ref={nodeRef}>
+            <polygon points="0,10 10,0 20,10 10,20" />
+        </g>
+    );
+
+    return enabled ? (
+        <Tooltip
+            triggerRef={nodeRef}
+            position="bottom"
+            enableFlip={false}
+            content={<div data-test="tooltip">content</div>}
+            popperProps={{ appendTo: 'inline' }}
+        >
+            {diamondNode}
+        </Tooltip>
+    ) : (
+        diamondNode
+    );
+};
+
+export default WhenExpressionDecorator;
+"#;
+        let tsconfig = r#"{ "compilerOptions": { "baseUrl": "." } }"#;
+        let files = &[("src/WhenExpressionDecorator.tsx", source)];
+
+        let condition = ReferencedCondition {
+            pattern: "^popperProps$".to_string(),
+            location: Some(ReferenceLocation::JsxProp),
+            component: Some("^Tooltip$".to_string()),
+            parent: None,
+            not_parent: None,
+            parent_from: None,
+            value: None,
+            from: Some("@patternfly/react-core".to_string()),
+            file_pattern: None,
+            child: None,
+            not_child: None,
+            requires_child: None,
+        };
+
+        let incidents = scan_with_tsconfig_project(
+            files,
+            "src/WhenExpressionDecorator.tsx",
+            tsconfig,
+            &condition,
+        );
+
+        assert_eq!(
+            incidents.len(),
+            1,
+            "Should find popperProps on Tooltip in ternary return. Got {} incidents: {:?}",
+            incidents.len(),
+            incidents
+                .iter()
+                .map(|i| format!(
+                    "{}:{:?} vars={:?}",
+                    i.file_uri, i.line_number, i.variables
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            incidents[0].variables.get("componentName"),
+            Some(&serde_json::Value::String("Tooltip".to_string())),
+        );
+        assert_eq!(
+            incidents[0].variables.get("propName"),
+            Some(&serde_json::Value::String("popperProps".to_string())),
+        );
+        assert_eq!(
+            incidents[0].variables.get("module"),
+            Some(&serde_json::Value::String(
+                "@patternfly/react-core".to_string()
+            )),
+        );
+    }
 }
